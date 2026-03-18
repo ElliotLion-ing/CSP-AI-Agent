@@ -1,0 +1,17 @@
+# Sensitive files - must not be published
+.env
+*.env
+.env.*
+
+# Development files
+*.log
+logs/
+node_modules/
+
+# Source maps (optional, remove if you want them published)
+# dist/**/*.map
+
+# Test and dev config
+.eslintrc.json
+.prettierrc.json
+tsconfig.json
