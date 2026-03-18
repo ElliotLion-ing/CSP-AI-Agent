@@ -1,15 +1,16 @@
 {
   "name": "@elliotding/ai-agent-mcp",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "CSP AI Agent MCP Server - Centralized AI tools distribution and management",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "csp-ai-agent-mcp": "./dist/index.js"
+    "csp-ai-agent-mcp": "dist/index.js"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
+    "postbuild": "chmod +x dist/index.js",
     "start": "NODE_PATH=. node dist/index.js",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
