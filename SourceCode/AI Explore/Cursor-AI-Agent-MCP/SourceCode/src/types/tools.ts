@@ -35,6 +35,12 @@ export interface SyncResourcesParams {
   mode?: 'check' | 'incremental' | 'full';
   scope?: 'global' | 'workspace' | 'all';
   types?: string[];
+  /**
+   * CSP API token from the user's mcp.json env configuration.
+   * Overrides the server-level fallback token so that each user
+   * makes API calls with their own identity.
+   */
+  user_token?: string;
 }
 
 export interface McpSetupItem {
@@ -83,6 +89,8 @@ export interface ManageSubscriptionParams {
   auto_sync?: boolean;
   scope?: 'global' | 'workspace';
   notify?: boolean;
+  /** CSP API token from the user's mcp.json env configuration. */
+  user_token?: string;
 }
 
 export interface ManageSubscriptionResult {
@@ -106,6 +114,8 @@ export interface SearchResourcesParams {
   team?: string;
   type?: string;
   keyword: string;
+  /** CSP API token from the user's mcp.json env configuration. */
+  user_token?: string;
 }
 
 export interface SearchResourcesResult {
@@ -131,9 +141,10 @@ export interface FileEntry {
 
 export interface UploadResourceParams {
   resource_id: string;
-  type: 'command' | 'skill' | 'rule' | 'mcp';
+  /** Resource category. Optional — auto-detected from file structure when omitted. */
+  type?: 'command' | 'skill' | 'rule' | 'mcp';
   message: string;
-  /** Human-readable resource name sent to the CSP API. Defaults to resource_id. */
+  /** Human-readable resource name sent to the CSP API. Defaults to the primary file name (without extension). */
   name?: string;
   /** Target source repo from ai-resources-config.json (e.g. "csp", "client-sdk-ai-hub"). Defaults to default_source. */
   target_source?: string;
@@ -147,6 +158,8 @@ export interface UploadResourceParams {
   // ---- Optional fields ----
   title?: string;
   metadata?: Record<string, unknown>;
+  /** CSP API token from the user's mcp.json env configuration. */
+  user_token?: string;
 }
 
 export interface UploadResourceResult {
@@ -161,6 +174,8 @@ export interface UploadResourceResult {
 export interface UninstallResourceParams {
   resource_id_or_name: string;
   remove_from_account?: boolean;
+  /** CSP API token from the user's mcp.json env configuration. */
+  user_token?: string;
 }
 
 export interface UninstallResourceResult {

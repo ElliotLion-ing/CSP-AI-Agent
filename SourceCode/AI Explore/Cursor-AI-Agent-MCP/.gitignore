@@ -57,3 +57,4 @@ SourceCode/node_modules/
 SourceCode/dist/
 Test/.cursor/
 .cursor/
+.cursor/.async-pilot-config.json

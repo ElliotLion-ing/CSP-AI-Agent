@@ -23,11 +23,21 @@ class APIClient {
       },
     });
 
-    // Request interceptor for authentication and logging
+    // Request interceptor for authentication and logging.
+    // Every request MUST carry a per-request Authorization header supplied by
+    // the caller via authConfig(userToken). If none is present the request is
+    // rejected immediately with a clear error so the caller knows they must
+    // configure their token in mcp.json under env.CSP_API_TOKEN.
     this.client.interceptors.request.use(
       (requestConfig) => {
-        if (config.csp.apiToken) {
-          requestConfig.headers.Authorization = `Bearer ${config.csp.apiToken}`;
+        if (!requestConfig.headers.Authorization) {
+          return Promise.reject(
+            new Error(
+              'CSP_API_TOKEN is not configured. ' +
+              'Please add your personal CSP token to your mcp.json under ' +
+              'mcpServers["csp-ai-agent"].env.CSP_API_TOKEN and restart Cursor.'
+            )
+          );
         }
         
         // Enhanced request logging
@@ -113,6 +123,27 @@ class APIClient {
         return Promise.reject(error);
       }
     );
+  }
+
+  /**
+   * Build an AxiosRequestConfig that carries a per-request user token.
+   * Pass the result as the `config` argument to get/post/put/delete or merge it
+   * into any existing request config so that the caller's token overrides the
+   * server-level fallback set in the interceptor.
+   *
+   * Usage:
+   *   await apiClient.get('/some/path', apiClient.authConfig(userToken));
+   *   await apiClient.post('/some/path', body, apiClient.authConfig(userToken));
+   */
+  authConfig(token: string | undefined, extra?: AxiosRequestConfig): AxiosRequestConfig {
+    if (!token) return extra ?? {};
+    return {
+      ...extra,
+      headers: {
+        ...(extra?.headers ?? {}),
+        Authorization: `Bearer ${token}`,
+      },
+    };
   }
 
   /**
@@ -241,12 +272,19 @@ class APIClient {
 
   /**
    * Get subscription list
+   *
+   * @param params   Query parameters for filtering subscriptions.
+   * @param userToken Per-request token from the caller's mcp.json configuration.
+   *                  When provided it overrides the server-level fallback token.
    */
-  async getSubscriptions(params?: {
-    scope?: 'general' | 'team' | 'user' | 'all';
-    types?: string[];
-    detail?: boolean;  // Added: include detailed metadata
-  }): Promise<{
+  async getSubscriptions(
+    params?: {
+      scope?: 'general' | 'team' | 'user' | 'all';
+      types?: string[];
+      detail?: boolean;
+    },
+    userToken?: string
+  ): Promise<{
     total: number;
     subscriptions: Array<{
       id: string;
@@ -281,27 +319,29 @@ class APIClient {
           };
         }>;
       };
-    }>('/csp/api/resources/subscriptions', { params });
-    
-    // Extract data from CSP API response format
+    }>('/csp/api/resources/subscriptions', this.authConfig(userToken, { params }));
+
     if (!response.data) {
       throw new Error('Invalid API response: missing data field');
     }
-    
+
     return response.data;
   }
 
   /**
    * Subscribe to resource
+   *
+   * @param userToken Per-request token from the caller's mcp.json configuration.
    */
   async subscribe(
-    resourceIds: string[], 
+    resourceIds: string[],
     autoSync = true,
-    scope?: 'general' | 'team' | 'user'  // Added: subscription scope
+    scope?: 'general' | 'team' | 'user',
+    userToken?: string
   ): Promise<{
     success: boolean;
-    subscriptions: Array<{ 
-      id: string; 
+    subscriptions: Array<{
+      id: string;
       name: string;
       type: string;
       subscribed_at: string;
@@ -312,44 +352,39 @@ class APIClient {
       result: string;
       data: {
         success?: boolean;
-        subscriptions: Array<{ 
-          id: string; 
+        subscriptions: Array<{
+          id: string;
           name: string;
           type: string;
           subscribed_at: string;
         }>;
       };
-    }>('/csp/api/resources/subscriptions/add', {
-      resource_ids: resourceIds,
-      auto_sync: autoSync,
-      scope,
-    });
-    
+    }>(
+      '/csp/api/resources/subscriptions/add',
+      { resource_ids: resourceIds, auto_sync: autoSync, scope },
+      this.authConfig(userToken)
+    );
+
     if (!response.data) {
       throw new Error('Invalid API response: missing data field');
     }
-    
-    return {
-      success: true,
-      subscriptions: response.data.subscriptions
-    };
+
+    return { success: true, subscriptions: response.data.subscriptions };
   }
 
   /**
    * Unsubscribe from resource
+   *
+   * @param userToken Per-request token from the caller's mcp.json configuration.
    */
-  async unsubscribe(resourceIds: string | string[]): Promise<void> {
-    // Support batch unsubscribe
+  async unsubscribe(resourceIds: string | string[], userToken?: string): Promise<void> {
     const ids = Array.isArray(resourceIds) ? resourceIds : [resourceIds];
     const response = await this.delete<{
       code: number;
       result: string;
       data: { removed_count: number };
-    }>('/csp/api/resources/subscriptions/remove', {
-      data: { resource_ids: ids }
-    });
-    
-    // Just validate response, no need to return anything
+    }>('/csp/api/resources/subscriptions/remove', this.authConfig(userToken, { data: { resource_ids: ids } }));
+
     if (!response.data) {
       throw new Error('Invalid API response: missing data field');
     }
@@ -357,15 +392,20 @@ class APIClient {
 
   /**
    * Search resources
+   *
+   * @param userToken Per-request token from the caller's mcp.json configuration.
    */
-  async searchResources(params: {
-    keyword: string;
-    team?: string;
-    type?: string;
-    detail?: boolean;      // Added: include detailed metadata
-    page?: number;         // Added: pagination
-    page_size?: number;    // Added: page size
-  }): Promise<{
+  async searchResources(
+    params: {
+      keyword: string;
+      team?: string;
+      type?: string;
+      detail?: boolean;
+      page?: number;
+      page_size?: number;
+    },
+    userToken?: string
+  ): Promise<{
     total: number;
     page?: number;
     page_size?: number;
@@ -415,22 +455,21 @@ class APIClient {
           };
         }>;
       };
-    }>('/csp/api/resources/search', { params });
-    
-    // Extract data from CSP API response format
+    }>('/csp/api/resources/search', this.authConfig(userToken, { params }));
+
     if (!response.data) {
       throw new Error('Invalid API response: missing data field');
     }
-    
+
     return {
       total: response.data.total,
       page: response.data.page,
       page_size: response.data.page_size,
-      results: response.data.results.map(r => ({
+      results: response.data.results.map((r) => ({
         ...r,
         score: r.score || 0,
-        is_subscribed: r.is_subscribed || false
-      }))
+        is_subscribed: r.is_subscribed || false,
+      })),
     };
   }
 
@@ -443,8 +482,13 @@ class APIClient {
    * files[].path is the relative path within the resource directory.
    * Single-file resources (command, rule) have exactly one element.
    * Multi-file resources (skill, mcp) have all their files included.
+   *
+   * @param userToken Per-request token from the caller's mcp.json configuration.
    */
-  async downloadResource(resourceId: string): Promise<{
+  async downloadResource(
+    resourceId: string,
+    userToken?: string
+  ): Promise<{
     resource_id: string;
     name: string;
     type: string;
@@ -463,14 +507,19 @@ class APIClient {
         hash: string;
         files: Array<{ path: string; content: string }>;
       };
-    }>(`/csp/api/resources/download/${resourceId}`);
+    }>(`/csp/api/resources/download/${resourceId}`, this.authConfig(userToken));
     return response.data;
   }
 
   /**
    * Get resource detail
+   *
+   * @param userToken Per-request token from the caller's mcp.json configuration.
    */
-  async getResourceDetail(resourceId: string): Promise<{
+  async getResourceDetail(
+    resourceId: string,
+    userToken?: string
+  ): Promise<{
     id: string;
     name: string;
     type: string;
@@ -489,7 +538,7 @@ class APIClient {
     };
     download_url: string;
   }> {
-    return this.get(`/csp/api/resources/${resourceId}`);
+    return this.get(`/csp/api/resources/${resourceId}`, this.authConfig(userToken));
   }
 
   /**
@@ -501,22 +550,29 @@ class APIClient {
    *
    * The server validates path traversal, total size (< 10 MB), and name conflicts.
    * All file types are supported — mcp packages may include .py, .js, package.json, etc.
+   *
+   * @param userToken Per-request token from the caller's mcp.json configuration.
    */
-  async uploadResourceFiles(params: {
-    type: string;
-    name: string;
-    files: Array<{ path: string; content: string }>;
-    target_source?: string;
-    force?: boolean;
-  }): Promise<{
+  async uploadResourceFiles(
+    params: {
+      type: string;
+      name: string;
+      files: Array<{ path: string; content: string }>;
+      target_source?: string;
+      force?: boolean;
+    },
+    userToken?: string
+  ): Promise<{
     upload_id: string;
     status: string;
     expires_at: string;
     preview_url?: string;
   }> {
-    const resp = await this.post<{ code: number; result: string; data: { upload_id: string; status: string; expires_at: string; preview_url?: string } }>(
-      '/csp/api/resources/upload', params
-    );
+    const resp = await this.post<{
+      code: number;
+      result: string;
+      data: { upload_id: string; status: string; expires_at: string; preview_url?: string };
+    }>('/csp/api/resources/upload', params, this.authConfig(userToken));
     return resp.data;
   }
 
@@ -526,19 +582,34 @@ class APIClient {
    * POST /csp/api/resources/finalize
    * Body: { upload_id, commit_message }
    * Response: { resource_id, version, url, commit_hash, download_url }
+   *
+   * @param userToken Per-request token from the caller's mcp.json configuration.
    */
-  async finalizeResourceUpload(uploadId: string, commitMessage: string): Promise<{
+  async finalizeResourceUpload(
+    uploadId: string,
+    commitMessage: string,
+    userToken?: string
+  ): Promise<{
     resource_id: string;
     version?: string;
     url?: string;
     commit_hash?: string;
     download_url?: string;
   }> {
-    const resp = await this.post<{ code: number; result: string; data: { resource_id: string; version?: string; url?: string; commit_hash?: string; download_url?: string } }>(
-      '/csp/api/resources/finalize', {
-        upload_id: uploadId,
-        commit_message: commitMessage,
-      }
+    const resp = await this.post<{
+      code: number;
+      result: string;
+      data: {
+        resource_id: string;
+        version?: string;
+        url?: string;
+        commit_hash?: string;
+        download_url?: string;
+      };
+    }>(
+      '/csp/api/resources/finalize',
+      { upload_id: uploadId, commit_message: commitMessage },
+      this.authConfig(userToken)
     );
     return resp.data;
   }

@@ -84,11 +84,14 @@ export async function searchResources(params: unknown): Promise<ToolResult<Searc
     // Search via API
     logger.debug({ team: typedParams.team, type: typedParams.type, keyword: typedParams.keyword }, 'Searching resources...');
     
-    const searchResults = await apiClient.searchResources({
-      team: typedParams.team,
-      type: typedParams.type,
-      keyword: typedParams.keyword,
-    });
+    const searchResults = await apiClient.searchResources(
+      {
+        team: typedParams.team,
+        type: typedParams.type,
+        keyword: typedParams.keyword,
+      },
+      typedParams.user_token
+    );
 
     // Check subscription and installation status for each result
     const enhancedResults = await Promise.all(
@@ -169,6 +172,13 @@ export const searchResourcesTool = {
       keyword: {
         type: 'string',
         description: 'Search keyword (searches in name, description, tags)',
+      },
+      user_token: {
+        type: 'string',
+        description:
+          'CSP API token for the current user. Read this from the CSP_API_TOKEN environment ' +
+          'variable configured in the user\'s mcp.json. When provided, this token is used ' +
+          'for all CSP API calls in this request instead of the server-level fallback token.',
       },
     },
     required: ['keyword'],

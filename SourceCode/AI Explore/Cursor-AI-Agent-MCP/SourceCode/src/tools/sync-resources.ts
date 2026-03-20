@@ -303,9 +303,10 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
   logToolStep('sync_resources', 'Tool invocation started', { params: typedParams });
 
   try {
-    const mode  = typedParams.mode  || 'incremental';
-    const scope = typedParams.scope || 'global';
-    const types = typedParams.types;
+    const mode      = typedParams.mode  || 'incremental';
+    const scope     = typedParams.scope || 'global';
+    const types     = typedParams.types;
+    const userToken = typedParams.user_token;
 
     logToolStep('sync_resources', 'Parameters validated', { mode, scope, types });
 
@@ -313,7 +314,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
     logToolStep('sync_resources', 'Step 1: Fetching subscriptions from API', { scope, types });
     const t1 = Date.now();
 
-    const subscriptions = await apiClient.getSubscriptions({ types });
+    const subscriptions = await apiClient.getSubscriptions({ types }, userToken);
 
     logToolStep('sync_resources', 'Subscriptions fetched', {
       total: subscriptions.total,
@@ -405,7 +406,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
           resourceType: sub.type,
         });
         const tDl = Date.now();
-        const downloadResult = await apiClient.downloadResource(sub.id);
+        const downloadResult = await apiClient.downloadResource(sub.id, userToken);
         logToolStep('sync_resources', 'Download complete', {
           resourceId: sub.id,
           fileCount: downloadResult.files.length,
@@ -655,6 +656,13 @@ export const syncResourcesTool = {
       types: {
         type: 'array',
         description: 'Filter by resource types (empty = all types)',
+      },
+      user_token: {
+        type: 'string',
+        description:
+          'CSP API token for the current user. Read this from the CSP_API_TOKEN environment ' +
+          'variable configured in the user\'s mcp.json. When provided, this token is used ' +
+          'for all CSP API calls in this request instead of the server-level fallback token.',
       },
     },
   },

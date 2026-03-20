@@ -422,27 +422,6 @@ let mockSubscriptions = {
       scope: 'all',
       notify: true,
     },
-    // Rules
-    {
-      id: 'rule-csp-elliotTest',
-      name: 'elliotTest',
-      type: 'rule',
-      team: 'Client-Public',
-      subscribed_at: '2026-03-01T00:00:00Z',
-      auto_sync: true,
-      scope: 'all',
-      notify: true,
-    },
-    {
-      id: 'rule-csp-csp-ai-agent',
-      name: 'csp-ai-agent',
-      type: 'rule',
-      team: 'Client-Public',
-      subscribed_at: '2026-03-01T00:00:00Z',
-      auto_sync: true,
-      scope: 'all',
-      notify: true,
-    },
   ],
 };
 let mockUploads = {};

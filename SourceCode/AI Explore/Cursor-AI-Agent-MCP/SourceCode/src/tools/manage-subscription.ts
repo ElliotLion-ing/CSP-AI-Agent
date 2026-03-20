@@ -37,7 +37,9 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         // Subscribe to resources
         const subResult = await apiClient.subscribe(
           typedParams.resource_ids,
-          typedParams.auto_sync
+          typedParams.auto_sync,
+          undefined,
+          typedParams.user_token
         );
 
         logger.info({ count: subResult.subscriptions.length }, 'Resources subscribed successfully');
@@ -50,7 +52,11 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
 
         if (shouldAutoSync && subResult.subscriptions.length > 0) {
           logger.info({ resourceIds: typedParams.resource_ids }, 'Auto-syncing newly subscribed resources...');
-          const syncResult = await syncResources({ mode: 'incremental', scope: typedParams.scope || 'global' });
+          const syncResult = await syncResources({
+            mode: 'incremental',
+            scope: typedParams.scope || 'global',
+            user_token: typedParams.user_token,
+          });
           if (syncResult.success && syncResult.data) {
             const sd = syncResult.data;
             syncSummary = `Auto-sync: ${sd.summary.synced} synced, ${sd.summary.cached} cached, ${sd.summary.failed} failed`;
@@ -97,7 +103,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         logger.debug({ resourceIds: typedParams.resource_ids }, 'Unsubscribing from resources...');
 
         // Cancel server-side subscription
-        await apiClient.unsubscribe(typedParams.resource_ids);
+        await apiClient.unsubscribe(typedParams.resource_ids, typedParams.user_token);
         logger.info({ count: typedParams.resource_ids.length }, 'Server-side subscriptions removed');
 
         // Uninstall local files and MCP config for each resource
@@ -156,7 +162,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         logger.debug({ scope: typedParams.scope || 'all' }, 'Listing subscriptions...');
 
         // Get subscriptions list
-        const subs = await apiClient.getSubscriptions({});
+        const subs = await apiClient.getSubscriptions({}, typedParams.user_token);
 
         result = {
           action: 'list',
@@ -188,7 +194,9 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
 
         const batchSubResult = await apiClient.subscribe(
           typedParams.resource_ids,
-          typedParams.auto_sync
+          typedParams.auto_sync,
+          undefined,
+          typedParams.user_token
         );
 
         logger.info({ count: batchSubResult.subscriptions.length }, 'Batch subscription completed');
@@ -201,7 +209,11 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
 
         if (shouldBatchAutoSync && batchSubResult.subscriptions.length > 0) {
           logger.info({ count: batchSubResult.subscriptions.length }, 'Auto-syncing batch subscribed resources...');
-          const batchSyncResult = await syncResources({ mode: 'incremental', scope: typedParams.scope || 'global' });
+          const batchSyncResult = await syncResources({
+            mode: 'incremental',
+            scope: typedParams.scope || 'global',
+            user_token: typedParams.user_token,
+          });
           if (batchSyncResult.success && batchSyncResult.data) {
             const sd = batchSyncResult.data;
             batchSyncSummary = `Auto-sync: ${sd.summary.synced} synced, ${sd.summary.cached} cached, ${sd.summary.failed} failed`;
@@ -324,6 +336,13 @@ export const manageSubscriptionTool = {
         type: 'boolean',
         description: 'Enable update notifications',
         default: true,
+      },
+      user_token: {
+        type: 'string',
+        description:
+          'CSP API token for the current user. Read this from the CSP_API_TOKEN environment ' +
+          'variable configured in the user\'s mcp.json. When provided, this token is used ' +
+          'for all CSP API calls in this request instead of the server-level fallback token.',
       },
     },
     required: ['action'],
