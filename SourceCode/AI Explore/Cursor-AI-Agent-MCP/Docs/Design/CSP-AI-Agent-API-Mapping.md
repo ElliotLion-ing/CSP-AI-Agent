@@ -639,3 +639,161 @@ Authorization: Bearer {token}
 }
 ```
 
+---
+
+## 8. 上报 AI Resource 使用遥测
+
+上报用户的 AI Resource 实际使用情况（Command/Skill Prompt 调用次数、已订阅 Rule 列表、已配置 MCP 列表）。由 MCP Server 的 TelemetryManager 每 10 秒定时触发，MCP Client 重连时立即额外上报一次，服务优雅关闭时执行最后一次上报。
+
+**架构背景**：Command 和 Skill 资源已改为 MCP Prompt 模式（不再下发实体文件到用户本地），调用经过 MCP Server handler，因此可以精确统计每次调用。Rule 和 MCP 仍下发本地，只统计已订阅/已配置列表。
+
+- **URL**: `POST /csp/api/resources/telemetry`
+- **认证**: 需要（`Authorization: Bearer {user_token}`）
+
+### Request Headers
+
+| Header | 说明 |
+|--------|------|
+| `Authorization` | `Bearer {user_token}` — 来自用户 mcp.json 中配置的个人 CSP Token |
+| `Content-Type` | `application/json` |
+
+### Request Body
+
+```json
+{
+  "client_version": "0.1.4",
+  "reported_at": "2026-03-20T10:00:10Z",
+  "events": [
+    {
+      "resource_id": "cmd-client-sdk-generate-testcase",
+      "resource_type": "command",
+      "resource_name": "generate-testcase",
+      "invocation_count": 5,
+      "first_invoked_at": "2026-03-20T09:55:00Z",
+      "last_invoked_at": "2026-03-20T09:59:30Z",
+      "jira_id": "PROJ-12345"
+    },
+    {
+      "resource_id": "skill-client-sdk-analyze-sdk-log",
+      "resource_type": "skill",
+      "resource_name": "analyze-sdk-log",
+      "invocation_count": 2,
+      "first_invoked_at": "2026-03-20T09:56:00Z",
+      "last_invoked_at": "2026-03-20T09:57:10Z"
+    }
+  ],
+  "subscribed_rules": [
+    {
+      "resource_id": "rule-csp-openspec",
+      "resource_name": "openspec-rule",
+      "subscribed_at": "2026-03-01T00:00:00Z"
+    }
+  ],
+  "configured_mcps": [
+    {
+      "resource_id": "mcp-client-sdk-jenkins",
+      "resource_name": "jenkins",
+      "configured_at": "2026-03-01T00:00:00Z"
+    }
+  ]
+}
+```
+
+### Request Body 字段说明
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `client_version` | string | 是 | MCP 客户端版本号 |
+| `reported_at` | string (ISO 8601) | 是 | 上报时间戳 |
+| `events` | array | 是 | Command/Skill Prompt 调用的增量事件（可为空数组） |
+| `events[].resource_id` | string | 是 | 资源唯一 ID |
+| `events[].resource_type` | string | 是 | `command` 或 `skill` |
+| `events[].resource_name` | string | 是 | 资源名称 |
+| `events[].invocation_count` | integer | 是 | 本上报窗口内的调用次数（≥ 1） |
+| `events[].first_invoked_at` | string (ISO 8601) | 是 | 本窗口首次调用时间 |
+| `events[].last_invoked_at` | string (ISO 8601) | 是 | 本窗口最后调用时间 |
+| `events[].jira_id` | string | **否** | Jira Issue ID（如 `PROJ-12345`）。用户不传时此字段**完全省略**（不为 null）。同一资源在不同 jira_id 下形成独立 event 条目 |
+| `subscribed_rules` | array | 是 | 当前已订阅的 Rule 全量列表（可为空数组）。Rule 无法统计调用次数（Cursor 引擎内部加载），此字段反映订阅快照 |
+| `subscribed_rules[].resource_id` | string | 是 | Rule 资源 ID |
+| `subscribed_rules[].resource_name` | string | 是 | Rule 名称 |
+| `subscribed_rules[].subscribed_at` | string (ISO 8601) | 是 | 订阅时间 |
+| `configured_mcps` | array | 是 | 当前已配置的 MCP 全量列表（可为空数组）。MCP 调用统计由各 MCP 服务自行埋点，此字段仅反映配置快照 |
+| `configured_mcps[].resource_id` | string | 是 | MCP 资源 ID |
+| `configured_mcps[].resource_name` | string | 是 | MCP 名称 |
+| `configured_mcps[].configured_at` | string (ISO 8601) | 是 | 配置时间 |
+
+### Response — Success (200)
+
+```json
+{
+  "code": 2000,
+  "result": "success",
+  "data": {
+    "accepted_count": 2,
+    "reported_at": "2026-03-20T10:00:10Z"
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `accepted_count` | integer | 服务端接受的 event 数量 |
+| `reported_at` | string | 服务端记录的上报时间（回传客户端时间，便于对账） |
+
+### Response — 认证失败 (401)
+
+```json
+{
+  "code": 4001,
+  "result": "failed",
+  "message": "unauthorized"
+}
+```
+
+### Response — 请求体格式错误 (400)
+
+```json
+{
+  "code": 4000,
+  "result": "failed",
+  "message": "invalid request body"
+}
+```
+
+### Response — 服务端错误 (500)
+
+```json
+{
+  "code": 5000,
+  "result": "failed",
+  "message": "internal server error"
+}
+```
+
+### 客户端行为说明
+
+#### 本地文件存储
+
+- **文件路径**: `{MCP Server 运行目录}/ai-resource-telemetry.json`
+  - 运行目录 = MCP Server 进程的 `process.cwd()`，通常为 `SourceCode/` 目录（npm start 的执行目录）
+  - **不在** `~/.cursor/` 下，不污染用户侧 Cursor 配置目录
+- **文件格式**: JSON，包含 `client_version`、`last_reported_at`、`pending_events`、`subscribed_rules`、`configured_mcps` 五个字段
+- **写入保护**: 使用 write-then-rename 原子写（先写 `.tmp`，成功后 rename），防止并发写或进程中断导致文件损坏
+- **文件锁**: 软件层面的串行队列（`withFileLock`），保证同一时刻只有一个写操作进行
+
+#### 上报时机（三个触发点）
+
+| 触发时机 | 说明 | 实现位置 |
+|---------|------|---------|
+| **定时上报** | MCP Server 启动后每 **10 秒**触发一次 flush | `index.ts` → `telemetry.startPeriodicFlush(10_000)` |
+| **重连立即上报** | SSE Client 重新连接（`server.oninitialized`）时立即额外触发一次 | `http.ts` → `telemetry.flushOnReconnect()` |
+| **优雅关闭最终上报** | 收到 SIGTERM/SIGINT 信号后，先 stop 定时器，再执行最后一次 flush | `index.ts` → `shutdown()` → `telemetry.stopPeriodicFlush()` + `await telemetry.flush()` |
+
+#### 其他行为
+
+- **Token 获取优先级**: 优先使用 SSE 连接中 `Authorization: Bearer` header 里的 token（`lastKnownToken`）；若无 SSE token 则 fallback 到 `process.env.CSP_API_TOKEN`（stdio 模式或单测）；两者均无时本次 flush 静默跳过，不报错
+- **失败重试**: 最多重试 3 次（指数退避：500ms → 1s → 2s），全部失败后静默丢弃当次 flush，`pending_events` 保留至下次成功上报
+- **幂等性**: 成功上报后清空 `pending_events` 并更新 `last_reported_at`；服务端应按 `(user_id, resource_id, jira_id, reported_at 窗口)` 去重
+- **jira_id 聚合**: 同一资源在不同 jira_id 下单独聚合形成独立 event 条目；未传 jira_id 时该字段**完全省略**（不为 null）
+- **subscribed_rules / configured_mcps**: 每次 `sync_resources` 或 `manage_subscription` 完成后全量更新到本地文件，随每次 flush 作为快照上报
+

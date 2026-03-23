@@ -15,6 +15,7 @@ import { apiClient } from '../api/client';
 import { getCursorTypeDir, getCursorRootDir } from '../utils/cursor-paths.js';
 import { MCPServerError, createValidationError } from '../types/errors';
 import type { UninstallResourceParams, UninstallResourceResult, ToolResult } from '../types/tools';
+import { promptManager } from '../prompts/index.js';
 
 /** Resource install entry — may be a file or a directory. */
 interface InstalledResource {
@@ -130,6 +131,67 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
     const pattern = typedParams.resource_id_or_name;
     const removeFromAccount = typedParams.remove_from_account || false;
 
+    const removedResources: Array<{ id: string; name: string; path: string }> = [];
+    let subscriptionRemoved = false;
+    let mcpJsonCleaned = false;
+
+    // ── Command / Skill: unregister MCP Prompt + delete cache ─────────────
+    // Match registered prompt names that contain the pattern.
+    const matchedPromptNames = promptManager.promptNames().filter(
+      (name) => name === pattern || name.includes(pattern),
+    );
+
+    if (matchedPromptNames.length > 0) {
+      for (const promptName of matchedPromptNames) {
+        // Prompt name format: <team>/<type>/<resource_name>
+        const parts = promptName.split('/');
+        const team         = parts[0] ?? 'general';
+        const resourceType = parts[1] as 'command' | 'skill' | undefined;
+        const resourceName = parts.slice(2).join('/') || promptName;
+
+        // Find the resource_id from the registered prompt (best-effort via name).
+        // For unsubscription, we pass the promptName as id if no better source.
+        const resourceId = pattern.startsWith('cmd-') || pattern.startsWith('skill-')
+          ? pattern
+          : promptName;
+
+        // Unregister from the in-memory prompt registry only.
+        // The server-side .prompt-cache/ files are intentionally NOT deleted here —
+        // they are shared across all users and will be regenerated on the next git pull.
+        promptManager.unregisterPrompt(resourceId, resourceType ?? 'command', resourceName);
+
+        removedResources.push({ id: resourceId, name: resourceName, path: `[MCP Prompt: ${promptName}]` });
+        logger.info({ promptName, team, resourceType, resourceName }, 'MCP Prompt unregistered via uninstall');
+      }
+
+      // Remove from server subscription if requested
+      if (removeFromAccount) {
+        for (const r of removedResources) {
+          try {
+            await apiClient.unsubscribe(r.id);
+            subscriptionRemoved = true;
+          } catch (err) {
+            logger.warn({ resourceId: r.id, err }, 'Failed to unsubscribe Command/Skill Prompt from account');
+          }
+        }
+      }
+
+      // Return early — Command/Skill resources have no local filesystem footprint.
+      const result: UninstallResourceResult = {
+        success: true,
+        removed_resources: removedResources,
+        subscription_removed: subscriptionRemoved,
+        message: [
+          `Successfully unregistered ${removedResources.length} MCP Prompt${removedResources.length > 1 ? 's' : ''}.`,
+          subscriptionRemoved ? 'Subscription removed from account.' : null,
+        ].filter(Boolean).join(' '),
+      };
+      const duration = Date.now() - startTime;
+      logToolCall('uninstall_resource', 'user-id', params as Record<string, unknown>, duration);
+      return { success: true, data: result };
+    }
+
+    // ── Rule / MCP: original local-filesystem removal path ────────────────
     logger.debug({ pattern }, 'Finding installed resources...');
     const matched = await findInstalledResources(pattern);
 
@@ -142,10 +204,6 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
     }
 
     logger.info({ pattern, count: matched.length }, 'Found matching installed resources');
-
-    const removedResources: Array<{ id: string; name: string; path: string }> = [];
-    let subscriptionRemoved = false;
-    let mcpJsonCleaned = false;
 
     for (const resource of matched) {
       try {

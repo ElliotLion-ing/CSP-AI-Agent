@@ -33,9 +33,9 @@ class APIClient {
         if (!requestConfig.headers.Authorization) {
           return Promise.reject(
             new Error(
-              'CSP_API_TOKEN is not configured. ' +
-              'Please add your personal CSP token to your mcp.json under ' +
-              'mcpServers["csp-ai-agent"].env.CSP_API_TOKEN and restart Cursor.'
+              'Authorization token is missing. ' +
+              'Ensure the MCP server is connected via SSE with a valid Bearer token in the Authorization header. ' +
+              'Check that your mcp.json has the correct "headers": {"Authorization": "Bearer <token>"} configured.'
             )
           );
         }
@@ -612,6 +612,55 @@ class APIClient {
       this.authConfig(userToken)
     );
     return resp.data;
+  }
+
+  /**
+   * Report AI resource usage telemetry to the server.
+   *
+   * POST /csp/api/resources/telemetry
+   * Body: { client_version, reported_at, events[], subscribed_rules[], configured_mcps[] }
+   *
+   * Called by TelemetryManager.flush() every ~10 seconds and on reconnect.
+   * Throws on non-2xx so the caller can apply retry logic.
+   *
+   * jira_id in each event entry is optional — it is only present when the user
+   * explicitly passed a Jira ID during the Prompt invocation.
+   *
+   * @param payload   Telemetry report payload built by TelemetryManager
+   * @param userToken Per-request Bearer token from the caller's mcp.json configuration
+   */
+  async reportTelemetry(
+    payload: {
+      client_version: string;
+      reported_at: string;
+      events: Array<{
+        resource_id: string;
+        resource_type: string;
+        resource_name: string;
+        invocation_count: number;
+        first_invoked_at: string;
+        last_invoked_at: string;
+        /** Optional Jira Issue ID (e.g. "PROJ-12345"). Absent when not provided. */
+        jira_id?: string;
+      }>;
+      subscribed_rules: Array<{
+        resource_id: string;
+        resource_name: string;
+        subscribed_at: string;
+      }>;
+      configured_mcps: Array<{
+        resource_id: string;
+        resource_name: string;
+        configured_at: string;
+      }>;
+    },
+    userToken: string
+  ): Promise<void> {
+    await this.post<{ code: number; result: string; data: unknown }>(
+      '/csp/api/resources/telemetry',
+      payload,
+      this.authConfig(userToken)
+    );
   }
 
   /**

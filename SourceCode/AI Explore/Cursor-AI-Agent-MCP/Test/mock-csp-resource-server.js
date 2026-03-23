@@ -705,6 +705,177 @@ function handleUpload(req, res) {
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Telemetry storage — persists all received reports in memory for the admin API.
+// ─────────────────────────────────────────────────────────────────────────────
+const telemetryLog = [];   // raw report records
+
+// Aggregated statistics rebuilt on every POST /csp/api/resources/telemetry.
+const telemetryStats = {
+  totalReports: 0,
+  totalEvents: 0,
+  // resource_id → { resource_id, resource_type, resource_name, total_invocations,
+  //                  jira_ids: Set, first_seen, last_seen }
+  byResource: new Map(),
+  // jira_id → total invocations under that ticket (excluding undefined)
+  byJira: new Map(),
+  // snapshot of latest subscribed_rules list
+  latestSubscribedRules: [],
+  // snapshot of latest configured_mcps list
+  latestConfiguredMcps: [],
+};
+
+/**
+ * Rebuild telemetryStats.byResource and byJira from the event array of one report.
+ * Aggregation key: resource_id + jira_id (matching TelemetryManager v2 logic).
+ */
+function accumulateTelemetryEvents(events) {
+  for (const evt of events) {
+    const key = evt.resource_id;
+    const count = evt.invocation_count || 1;
+
+    if (!telemetryStats.byResource.has(key)) {
+      telemetryStats.byResource.set(key, {
+        resource_id:   evt.resource_id,
+        resource_type: evt.resource_type,
+        resource_name: evt.resource_name,
+        total_invocations: 0,
+        jira_ids: new Set(),
+        first_seen: evt.first_invoked_at || new Date().toISOString(),
+        last_seen:  evt.last_invoked_at  || new Date().toISOString(),
+      });
+    }
+
+    const entry = telemetryStats.byResource.get(key);
+    entry.total_invocations += count;
+    entry.last_seen = evt.last_invoked_at || entry.last_seen;
+    if (evt.jira_id) {
+      entry.jira_ids.add(evt.jira_id);
+      telemetryStats.byJira.set(
+        evt.jira_id,
+        (telemetryStats.byJira.get(evt.jira_id) || 0) + count
+      );
+    }
+  }
+}
+
+// Handler: POST /csp/api/resources/telemetry
+// Accepts AI resource usage telemetry from the MCP client (TelemetryManager).
+// Validates the v2 payload (events + subscribed_rules + configured_mcps).
+function handleTelemetry(req, res) {
+  if (!validateToken(req)) {
+    log('Telemetry: Auth failed');
+    return sendError(res, 401, 4001, 'unauthorized');
+  }
+
+  readBody(req, (err, body) => {
+    if (err) {
+      log('Telemetry: Invalid JSON body');
+      return sendError(res, 400, 4000, 'invalid request body');
+    }
+
+    const { client_version, reported_at, events, subscribed_rules, configured_mcps } = body;
+
+    // ── Validation ────────────────────────────────────────────────────────
+    if (!reported_at || !Array.isArray(events) || !Array.isArray(subscribed_rules)) {
+      log('Telemetry: Missing required fields (reported_at / events / subscribed_rules)');
+      return sendError(res, 400, 4000, 'missing required fields: reported_at, events, subscribed_rules');
+    }
+
+    // configured_mcps is required in v2 (may be empty array)
+    if (!Array.isArray(configured_mcps)) {
+      log('Telemetry: Missing configured_mcps field (required in v2)');
+      return sendError(res, 400, 4000, 'missing required field: configured_mcps (array)');
+    }
+
+    // Validate each event entry
+    for (const evt of events) {
+      if (!evt.resource_id || !evt.resource_type || !evt.resource_name) {
+        log(`Telemetry: Invalid event entry — missing resource_id/resource_type/resource_name`);
+        return sendError(res, 400, 4000, 'each event must have resource_id, resource_type, resource_name');
+      }
+      // jira_id must be a string when present (never null)
+      if ('jira_id' in evt && evt.jira_id !== undefined && typeof evt.jira_id !== 'string') {
+        log(`Telemetry: jira_id must be a string, got ${typeof evt.jira_id}`);
+        return sendError(res, 400, 4000, 'event.jira_id must be a non-null string when present');
+      }
+    }
+
+    // ── Persist ───────────────────────────────────────────────────────────
+    telemetryLog.push({
+      received_at: new Date().toISOString(),
+      client_version,
+      reported_at,
+      events,
+      subscribed_rules,
+      configured_mcps,
+    });
+
+    // ── Aggregate stats ───────────────────────────────────────────────────
+    telemetryStats.totalReports++;
+    telemetryStats.totalEvents += events.length;
+    accumulateTelemetryEvents(events);
+    telemetryStats.latestSubscribedRules = subscribed_rules;
+    telemetryStats.latestConfiguredMcps  = configured_mcps;
+
+    const accepted_count = events.length;
+    const commandSkillCount = events.filter(e => e.resource_type === 'command' || e.resource_type === 'skill').length;
+    log(
+      `Telemetry: Accepted ${accepted_count} event(s) ` +
+      `(cmd/skill=${commandSkillCount}), ` +
+      `${subscribed_rules.length} rule(s), ` +
+      `${configured_mcps.length} mcp(s). ` +
+      `client_version=${client_version}`
+    );
+
+    sendJSON(res, 200, {
+      code: 2000,
+      result: 'success',
+      data: { accepted_count, reported_at },
+    });
+  });
+}
+
+// Handler: GET /admin/telemetry-report
+// Returns a human-readable telemetry statistics report for local testing/verification.
+// No auth required (admin/local-dev endpoint).
+function handleTelemetryReport(req, res) {
+  const resourceRows = Array.from(telemetryStats.byResource.values()).map(r => ({
+    resource_id:        r.resource_id,
+    resource_type:      r.resource_type,
+    resource_name:      r.resource_name,
+    total_invocations:  r.total_invocations,
+    jira_ids:           Array.from(r.jira_ids),
+    first_seen:         r.first_seen,
+    last_seen:          r.last_seen,
+  }));
+
+  const jiraRows = Array.from(telemetryStats.byJira.entries()).map(([jira_id, count]) => ({
+    jira_id,
+    total_invocations: count,
+  }));
+
+  const report = {
+    generated_at:          new Date().toISOString(),
+    summary: {
+      total_reports:         telemetryStats.totalReports,
+      total_events:          telemetryStats.totalEvents,
+      unique_resources:      telemetryStats.byResource.size,
+      unique_jira_ids:       telemetryStats.byJira.size,
+      subscribed_rules:      telemetryStats.latestSubscribedRules.length,
+      configured_mcps:       telemetryStats.latestConfiguredMcps.length,
+    },
+    by_resource:             resourceRows,
+    by_jira:                 jiraRows,
+    latest_subscribed_rules: telemetryStats.latestSubscribedRules,
+    latest_configured_mcps:  telemetryStats.latestConfiguredMcps,
+    raw_log_count:           telemetryLog.length,
+  };
+
+  log(`TelemetryReport: Serving report (${resourceRows.length} resources, ${jiraRows.length} jira IDs)`);
+  sendJSON(res, 200, { code: 2000, result: 'success', data: report });
+}
+
 // Handler: POST /csp/api/resources/finalize
 function handleFinalize(req, res) {
   if (!validateToken(req)) {
@@ -1239,6 +1410,15 @@ const server = http.createServer((req, res) => {
     return handleValidateToken(req, res);
   }
 
+  if (req.method === 'POST' && pathname === '/csp/api/resources/telemetry') {
+    return handleTelemetry(req, res);
+  }
+
+  // Admin: telemetry statistics report (no auth required for local dev)
+  if (req.method === 'GET' && pathname === '/admin/telemetry-report') {
+    return handleTelemetryReport(req, res);
+  }
+
   // Admin: hot-reload resources from AI-Resources directory (no auth required for local dev)
   if (req.method === 'POST' && pathname === '/admin/reload-resources') {
     const before = mockResources.length;
@@ -1283,6 +1463,8 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`  POST /csp/api/resources/subscriptions/add`);
   console.log(`  DELETE /csp/api/resources/subscriptions/remove`);
   console.log(`  GET  /csp/api/user/permissions`);
+  console.log(`  POST /csp/api/resources/telemetry`);
+  console.log(`  GET  /admin/telemetry-report  (telemetry stats, no auth)`);
   console.log(`  POST /admin/reload-resources  (hot-reload, no auth)`);
   console.log(`\nAuth: Bearer Token required (from CSP-Jwt-token.json)`);
   console.log(`========================================\n`);

@@ -301,6 +301,7 @@ Cursor IDE（开发环境）
 | **search_resources** | 资源搜索 | team, type, keyword |
 | **upload_resource** | 上传资源 | resource_id, type, message, team(默认Client-Public) |
 | **uninstall_resource** | 卸载资源 | resource_id_or_name, remove_from_account(默认false) |
+| **track_usage** | 遥测埋点（自动触发） | resource_id, resource_type, resource_name, user_token, jira_id(可选) |
 
 ### 3.2 下载流程（sync_resources - 增强缓存机制）
 

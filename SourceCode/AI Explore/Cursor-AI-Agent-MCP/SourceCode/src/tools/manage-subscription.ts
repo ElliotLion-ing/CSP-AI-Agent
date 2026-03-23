@@ -9,6 +9,7 @@ import { MCPServerError, createValidationError } from '../types/errors';
 import type { ManageSubscriptionParams, ManageSubscriptionResult, ToolResult } from '../types/tools';
 import { syncResources } from './sync-resources';
 import { uninstallResource } from './uninstall-resource';
+import { promptManager } from '../prompts/index.js';
 
 export async function manageSubscription(params: unknown): Promise<ToolResult<ManageSubscriptionResult>> {
   const startTime = Date.now();
@@ -106,9 +107,24 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         await apiClient.unsubscribe(typedParams.resource_ids, typedParams.user_token);
         logger.info({ count: typedParams.resource_ids.length }, 'Server-side subscriptions removed');
 
-        // Uninstall local files and MCP config for each resource
+        // Uninstall local files and MCP config for each resource.
+        // For Command/Skill: unregister MCP Prompt instead of deleting local files.
         const uninstallResults: Array<{ id: string; removed: boolean; detail: string }> = [];
         for (const resourceId of typedParams.resource_ids) {
+          // Determine if this is a Command or Skill by checking the prompt registry.
+          // Resource IDs follow the pattern: cmd-<source>-<name> or skill-<source>-<name>.
+          const isCommand = resourceId.startsWith('cmd-');
+          const isSkill   = resourceId.startsWith('skill-');
+          if (isCommand || isSkill) {
+            const resourceType = isCommand ? 'command' : 'skill';
+            // Extract resource name from the ID (cmd-<team>-<name> or skill-<team>-<name>).
+            const parts = resourceId.split('-');
+            const resourceName = parts.slice(2).join('-') || resourceId;
+            promptManager.unregisterPrompt(resourceId, resourceType as 'command' | 'skill', resourceName);
+            uninstallResults.push({ id: resourceId, removed: true, detail: `Unregistered MCP Prompt for "${resourceName}"` });
+            logger.info({ resourceId, resourceType }, 'MCP Prompt unregistered on unsubscribe');
+            continue;
+          }
           // Use the last segment of the resource ID as the search pattern
           // e.g. "mcp-client-sdk-ai-hub-jenkins" → "jenkins"
           //      "rule-csp-elliotTest"            → "elliotTest"
@@ -340,9 +356,8 @@ export const manageSubscriptionTool = {
       user_token: {
         type: 'string',
         description:
-          'CSP API token for the current user. Read this from the CSP_API_TOKEN environment ' +
-          'variable configured in the user\'s mcp.json. When provided, this token is used ' +
-          'for all CSP API calls in this request instead of the server-level fallback token.',
+          'DO NOT set this field — it is automatically injected by the MCP server from ' +
+          'the authenticated SSE connection. The server always provides the correct token.',
       },
     },
     required: ['action'],

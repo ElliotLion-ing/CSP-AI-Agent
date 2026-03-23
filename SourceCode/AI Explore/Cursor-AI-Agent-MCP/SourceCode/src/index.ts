@@ -10,6 +10,8 @@ import { startLogCleanupSchedule, stopLogCleanupSchedule } from './utils/log-cle
 import { startServer, stopServer } from './server';
 import { stopCacheCleanup } from './auth/token-validator';
 import { sessionManager } from './session/manager';
+import { telemetry } from './telemetry/index.js';
+import { apiClient } from './api/client.js';
 
 // Global error handlers
 process.on('uncaughtException', (error: Error) => {
@@ -52,11 +54,21 @@ async function main() {
   // Start log cleanup scheduler
   const cleanupTimer = startLogCleanupSchedule();
 
+  // Wire up telemetry reporting (inject API client to avoid circular import)
+  telemetry.configure(
+    (payload, token) => apiClient.reportTelemetry(payload, token),
+    () => process.env.CSP_API_TOKEN
+  );
+
   try {
     // Start MCP Server
     await startServer();
 
     logger.info({ port: config.port }, `✅ CSP AI Agent MCP Server started successfully`);
+
+    // Start periodic telemetry flush (every 10 seconds)
+    telemetry.startPeriodicFlush(10_000);
+    logger.info('Telemetry flush scheduler started (interval: 10s)');
   } catch (error) {
     logger.error({ error }, 'Failed to start server');
     stopLogCleanupSchedule(cleanupTimer);
@@ -109,6 +121,12 @@ async function main() {
       // Stop token cache cleanup
       stopCacheCleanup();
       logger.info('Token cache cleanup stopped');
+
+      // Stop telemetry scheduler and perform final flush
+      telemetry.stopPeriodicFlush();
+      logger.info('Telemetry scheduler stopped, performing final flush...');
+      await telemetry.flush();
+      logger.info('Final telemetry flush completed');
 
       // Phase 4: Flush logs
       logger.info('Phase 4: Flushing logs...');

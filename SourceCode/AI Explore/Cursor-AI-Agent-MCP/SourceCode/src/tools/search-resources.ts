@@ -9,7 +9,6 @@ import { filesystemManager } from '../filesystem/manager';
 import { getCursorResourcePath } from '../utils/cursor-paths.js';
 import { MCPServerError } from '../types/errors';
 import type { SearchResourcesParams, SearchResourcesResult, ToolResult } from '../types/tools';
-
 // Simple in-memory cache
 const searchCache = new Map<string, { results: SearchResourcesResult; timestamp: number }>();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
@@ -176,9 +175,8 @@ export const searchResourcesTool = {
       user_token: {
         type: 'string',
         description:
-          'CSP API token for the current user. Read this from the CSP_API_TOKEN environment ' +
-          'variable configured in the user\'s mcp.json. When provided, this token is used ' +
-          'for all CSP API calls in this request instead of the server-level fallback token.',
+          'DO NOT set this field — it is automatically injected by the MCP server from ' +
+          'the authenticated SSE connection. The server always provides the correct token.',
       },
     },
     required: ['keyword'],

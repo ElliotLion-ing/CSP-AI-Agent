@@ -18,6 +18,7 @@ import {
   searchResourcesTool,
   uploadResourceTool,
   uninstallResourceTool,
+  trackUsageTool,
 } from './tools';
 import { httpServer } from './server/http';
 
@@ -34,6 +35,7 @@ function registerTools() {
   toolRegistry.registerTool(searchResourcesTool);
   toolRegistry.registerTool(uploadResourceTool);
   toolRegistry.registerTool(uninstallResourceTool);
+  toolRegistry.registerTool(trackUsageTool);
 
   logger.info(
     { toolCount: toolRegistry.getToolCount() },
@@ -56,9 +58,15 @@ async function startStdioServer(): Promise<void> {
     {
       capabilities: {
         tools: {},
+        prompts: {},
       },
     }
   );
+
+  // Install Prompt list/get handlers so Command and Skill resources are
+  // exposed as MCP Prompts (Cursor slash commands).
+  const { promptManager } = await import('./prompts/index.js');
+  promptManager.installHandlers(server);
 
   // Handle tools/list request
   server.setRequestHandler(ListToolsRequestSchema, () => {
@@ -133,6 +141,11 @@ async function startStdioServer(): Promise<void> {
   // Connect to stdio transport
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // Flush any pending telemetry immediately — stdio reconnects when Cursor
+  // restarts the process, so treat connect as a reconnect event.
+  const { telemetry: tel } = await import('./telemetry/index.js');
+  tel.flushOnReconnect();
 
   logger.info('✅ MCP Server started successfully (stdio transport)');
 }

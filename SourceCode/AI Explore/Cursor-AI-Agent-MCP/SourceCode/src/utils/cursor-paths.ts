@@ -81,3 +81,16 @@ export function getCursorTypeDir(resourceType: string): string {
 export function getCursorResourcePath(resourceType: string, resourceName: string): string {
   return path.join(getCursorTypeDir(resourceType), resourceName);
 }
+
+/**
+ * Returns the path to the local AI resource telemetry file.
+ *
+ * Stored at the Cursor root level (not inside a resource-type subdirectory)
+ * so it persists independently of individual resource installs/uninstalls.
+ *
+ * macOS / Linux : ~/.cursor/ai-resource-telemetry.json
+ * Windows       : %APPDATA%\Cursor\User\ai-resource-telemetry.json
+ */
+export function getTelemetryFilePath(): string {
+  return path.join(getCursorRootDir(), 'ai-resource-telemetry.json');
+}
