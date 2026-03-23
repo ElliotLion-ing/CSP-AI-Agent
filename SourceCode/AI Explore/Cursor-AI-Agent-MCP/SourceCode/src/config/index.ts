@@ -46,6 +46,12 @@ export interface Config {
   http?: {
     host: string;
     port: number;
+    /** URL path prefix when the server runs behind a reverse proxy sub-path.
+     *  e.g.  HTTP_BASE_PATH=/csp-agent  → SSE at /csp-agent/sse
+     *                                    → messages POST to /csp-agent/message
+     *  Leave empty (default) for direct / root-path deployments.
+     */
+    basePath: string;
   };
 
   // Session (for SSE transport)
@@ -56,7 +62,10 @@ export interface Config {
   // CSP API
   csp: {
     apiBaseUrl: string;
-    apiToken: string;
+    // NOTE: No apiToken here. The user token comes from mcp.json env.CSP_API_TOKEN,
+    // which Cursor injects into the process environment at startup. Each tool call
+    // receives it via the user_token argument; telemetry reads process.env.CSP_API_TOKEN
+    // directly. Storing it in config would encourage incorrect singleton-token patterns.
     timeout: number;
   };
 
@@ -140,9 +149,6 @@ export function loadConfig(): Config {
   const logLevel = (process.env.LOG_LEVEL || 'info') as Config['logLevel'];
   const transportMode = (process.env.TRANSPORT_MODE || 'stdio') as 'stdio' | 'sse';
 
-  // Debug: Log CSP_API_TOKEN to verify it was loaded
-  console.log(`🔑 CSP_API_TOKEN from env: ${process.env.CSP_API_TOKEN ? process.env.CSP_API_TOKEN.substring(0, 20) + '...' : 'NOT SET'}`);
-
   return {
     nodeEnv,
     port: getEnvNumber('PORT', 5090),
@@ -155,6 +161,7 @@ export function loadConfig(): Config {
     http: transportMode === 'sse' ? {
       host: getEnv('HTTP_HOST', '0.0.0.0'),
       port: getEnvNumber('HTTP_PORT', 3000),
+      basePath: getEnv('HTTP_BASE_PATH', ''),
     } : undefined,
 
     session: transportMode === 'sse' ? {
@@ -163,7 +170,6 @@ export function loadConfig(): Config {
 
     csp: {
       apiBaseUrl: getEnv('CSP_API_BASE_URL', 'https://csp.example.com'),
-      apiToken: getEnv('CSP_API_TOKEN', 'test-token-12345'),
       timeout: getEnvNumber('CSP_API_TIMEOUT', 30000),
     },
 

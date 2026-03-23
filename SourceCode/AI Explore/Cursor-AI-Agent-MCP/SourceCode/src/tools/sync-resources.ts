@@ -1,14 +1,19 @@
 /**
  * sync_resources Tool
  *
- * Synchronises the user's subscribed AI resources to the local Cursor directories:
- *   macOS/Linux : ~/.cursor/skills/  ~/.cursor/commands/  ~/.cursor/rules/  ~/.cursor/mcp-servers/
- *   Windows     : %APPDATA%\Cursor\User\<type>\
+ * Synchronises the user's subscribed AI resources.
+ *
+ * Resource delivery strategy (v1.5):
+ *   - Command / Skill : registered as MCP Prompts (NOT written to local filesystem).
+ *                       Content is generated into .prompt-cache/ and registered via PromptManager.
+ *   - Rule            : downloaded to ~/.cursor/rules/ (Cursor engine requires local files).
+ *   - MCP             : downloaded to ~/.cursor/mcp-servers/ and registered in mcp.json.
  *
  * Flow:
  *   1. Fetch subscription list from CSP server (REST API).
  *   2. (non-check) Trigger Git sync on server side via multiSourceGitManager.
- *   3. For each subscription: download content via REST API → write to Cursor directory.
+ *   3. For each subscription: handle per type as above.
+ *   4. Update telemetry: subscribed_rules + configured_mcps lists.
  */
 
 import * as fs from 'fs/promises';
@@ -19,6 +24,25 @@ import { multiSourceGitManager } from '../git/multi-source-manager';
 import { getCursorResourcePath, getCursorTypeDir, getCursorRootDir } from '../utils/cursor-paths';
 import { MCPServerError } from '../types/errors';
 import type { SyncResourcesParams, SyncResourcesResult, McpSetupItem, ToolResult } from '../types/tools';
+import { telemetry } from '../telemetry/index.js';
+import { promptManager } from '../prompts/index.js';
+
+/**
+ * Extract the `description` field from YAML frontmatter in a Markdown file.
+ * Frontmatter is delimited by leading `---` and closing `---` lines.
+ * Returns undefined if no frontmatter or no description key is found.
+ */
+function extractFrontmatterDescription(content: string): string | undefined {
+  if (!content.startsWith('---')) return undefined;
+  const end = content.indexOf('\n---', 3);
+  if (end === -1) return undefined;
+  const frontmatter = content.slice(3, end);
+  for (const line of frontmatter.split('\n')) {
+    const match = /^description:\s*(.+)$/.exec(line.trim());
+    if (match) return match[1]!.trim().replace(/^['"]|['"]$/g, '');
+  }
+  return undefined;
+}
 
 /**
  * Two supported mcp-config.json formats:
@@ -397,6 +421,86 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
           continue;
         }
 
+        // ── Command / Skill: MCP Prompt mode (no local file write) ──────────
+        // Download content → generate intermediate cache → register as MCP Prompt.
+        if (sub.type === 'command' || sub.type === 'skill') {
+          logToolStep('sync_resources', `Registering ${sub.type} as MCP Prompt`, {
+            resourceId: sub.id,
+            resourceName: sub.name,
+          });
+          try {
+            const tDl = Date.now();
+            const downloadResult = await apiClient.downloadResource(sub.id, userToken);
+            logToolStep('sync_resources', 'Download complete (Prompt mode)', {
+              resourceId: sub.id,
+              fileCount: downloadResult.files.length,
+              duration: Date.now() - tDl,
+            });
+
+            // Primary Markdown content selection:
+            //   - skill: prefer SKILL.md (canonical entrypoint for all skill content)
+            //   - command: prefer the file whose name matches the resource name
+            //   - fallback: first .md file, then first file of any type
+            const isSkill = sub.type === 'skill';
+            const primaryFile = isSkill
+              ? (downloadResult.files.find((f) => path.basename(f.path) === 'SKILL.md') ??
+                 downloadResult.files.find((f) => f.path.endsWith('.md')) ??
+                 downloadResult.files[0])
+              : (downloadResult.files.find((f) => path.basename(f.path).replace(/\.md$/, '') === sub.name) ??
+                 downloadResult.files.find((f) => f.path.endsWith('.md')) ??
+                 downloadResult.files[0]);
+
+            const rawContent = primaryFile?.content ?? '';
+
+            // Extract description from frontmatter (---\ndescription: ...\n---)
+            // falling back to the subscription's description field or resource name.
+            const frontmatterDesc = extractFrontmatterDescription(rawContent);
+            const description =
+              frontmatterDesc ??
+              (sub as any).description ??
+              sub.name;
+
+            await promptManager.registerPrompt({
+              resource_id: sub.id,
+              resource_type: sub.type as 'command' | 'skill',
+              resource_name: sub.name,
+              team: (sub as any).team ?? 'general',
+              description,
+              rawContent,
+            });
+
+            // Clean up any legacy local files that may have been written by an
+            // older version of sync_resources.  Command/Skill resources are now
+            // served exclusively as MCP Prompts; stale local files would cause
+            // the AI to read outdated content (without the track_usage header).
+            try {
+              const legacyPath = getCursorResourcePath(sub.type, `${sub.name}.md`);
+              await fs.unlink(legacyPath);
+              logger.info(
+                { resourceId: sub.id, legacyPath },
+                'Removed legacy local file for Command/Skill resource',
+              );
+            } catch {
+              // File didn't exist — nothing to clean up.
+            }
+
+            tally.synced++;
+            details.push({ id: sub.id, name: sub.name, action: 'synced', version: resourceVersion });
+            logToolStep('sync_resources', `${sub.type} registered as MCP Prompt`, {
+              resourceId: sub.id,
+              promptCount: promptManager.size,
+            });
+          } catch (promptErr) {
+            logger.error(
+              { resourceId: sub.id, error: (promptErr as Error).message },
+              'Failed to register Command/Skill as MCP Prompt',
+            );
+            tally.failed++;
+            details.push({ id: sub.id, name: sub.name, action: 'failed', version: resourceVersion });
+          }
+          continue;
+        }
+
         // Download all files for this resource from the CSP server.
         // We always download first so we can inspect the payload and determine
         // whether this is a remote-URL-only MCP (Format B: config-only, no
@@ -608,6 +712,27 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
       timestamp: new Date().toISOString()
     }, 'sync_resources completed successfully');
 
+    // Update telemetry snapshot lists (fire-and-forget).
+    // Rules: cannot track individual invocations; report subscription list only.
+    const subscribedRules = subscriptions.subscriptions
+      .filter((s) => s.type === 'rule')
+      .map((s) => ({
+        resource_id: s.id,
+        resource_name: s.name,
+        subscribed_at: (s as any).subscribed_at ?? new Date().toISOString(),
+      }));
+    if (userToken) telemetry.updateSubscribedRules(subscribedRules, userToken).catch(() => {});
+
+    // MCPs: individual invocation tracking is each MCP server's own responsibility.
+    const configuredMcps = subscriptions.subscriptions
+      .filter((s) => s.type === 'mcp')
+      .map((s) => ({
+        resource_id: s.id,
+        resource_name: s.name,
+        configured_at: (s as any).subscribed_at ?? new Date().toISOString(),
+      }));
+    if (userToken) telemetry.updateConfiguredMcps(configuredMcps, userToken).catch(() => {});
+
     return { success: true, data: result };
 
   } catch (error) {
@@ -660,9 +785,8 @@ export const syncResourcesTool = {
       user_token: {
         type: 'string',
         description:
-          'CSP API token for the current user. Read this from the CSP_API_TOKEN environment ' +
-          'variable configured in the user\'s mcp.json. When provided, this token is used ' +
-          'for all CSP API calls in this request instead of the server-level fallback token.',
+          'DO NOT set this field — it is automatically injected by the MCP server from ' +
+          'the authenticated SSE connection. The server always provides the correct token.',
       },
     },
   },

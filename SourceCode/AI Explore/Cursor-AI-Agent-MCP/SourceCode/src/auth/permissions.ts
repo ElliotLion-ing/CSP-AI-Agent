@@ -69,6 +69,12 @@ const defaultPermissions: ToolPermission[] = [
     allowedGroups: ['*'],
     requiredPermission: PermissionLevel.WRITE,
   },
+  // track_usage - internal telemetry tool, always allowed for all authenticated users
+  {
+    tool: 'track_usage',
+    allowedGroups: ['*'],
+    requiredPermission: PermissionLevel.WRITE,
+  },
 ];
 
 /**

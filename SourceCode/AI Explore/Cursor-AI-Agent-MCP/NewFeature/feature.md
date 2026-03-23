@@ -165,13 +165,6 @@ dependencies:
   平台检测：未发现相似资源，资源已独立发布
 ```
 
-#### 1.5 依赖关系可视化
-
-在工作流拼装页面（见需求二）中，以有向图方式展示资源依赖关系，帮助用户直观理解哪些资源需要协同工作：
-- 强依赖：实线箭头，红色
-- 弱依赖：虚线箭头，黄色
-- 鼠标悬停显示依赖描述
-
 ### 技术实现要点
 
 | 模块 | 变更内容 |
@@ -181,7 +174,6 @@ dependencies:
 | `manage_subscription` | 订阅/取消时递归处理依赖链；弱依赖询问用户确认 |
 | `sync_resources` | 支持批量同步依赖资源 |
 | AI-Resources 仓库 | 各资源 `metadata.yaml` 补充依赖声明 |
-| CSP 管理页面 | 展示资源依赖关系图（实线/虚线区分强弱依赖） |
 | 依赖分析引擎 | 新增 `DependencyAnalyzer` 模块，提供：批量依赖扫描、依赖摘要生成 |
 | 相似资源检测器 | 新增 `DuplicateDetector` 模块（独立于依赖分析），提供：名称相似度匹配、同类型资源语义对比、内容哈希完全重复检测、按需拉取已有资源做逐行 diff |
 
@@ -197,12 +189,6 @@ dependencies:
 - 无法将最佳实践沉淀为可复用的流程
 
 参考 OpenClaw（opclaw）的 Skill 组装方式，可以将固定流程、OpenSpec 和其他 Tools 组装成新的工作流，并统一下发到 Team 的 Cursor 环境。
-
-**当前实现状态（HTML Demo）：**
-- 工作流列表页：`HTML-Page/workflow-list.html`
-- 工作流编辑器页：`HTML-Page/workflow-builder.html`
-
----
 
 ### 2.1 工作流数据模型
 

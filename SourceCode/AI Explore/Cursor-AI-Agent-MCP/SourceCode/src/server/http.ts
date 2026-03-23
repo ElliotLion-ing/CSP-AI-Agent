@@ -12,8 +12,12 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { syncResources } from '../tools/sync-resources.js';
+import { telemetry } from '../telemetry/index.js';
+import { promptManager } from '../prompts/index.js';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { sessionManager } from '../session/manager';
@@ -103,17 +107,19 @@ export class HTTPServer {
   // ─────────────────────────────────────────────────────────────────────────
 
   private setupRoutes(): void {
+    const basePath = config.http?.basePath ?? '';
+
     // Health check
-    this.fastify.get('/health', this.handleHealth.bind(this));
+    this.fastify.get(`${basePath}/health`, this.handleHealth.bind(this));
 
     // SSE connection — GET establishes the stream (SDK standard)
-    this.fastify.get('/sse', {
+    this.fastify.get(`${basePath}/sse`, {
       preHandler: tokenAuthOrLegacyMiddleware,
       handler: this.handleSSEConnection.bind(this),
     });
 
     // Message endpoint — POST delivers JSON-RPC messages, sessionId in query
-    this.fastify.post('/message', this.handleMessage.bind(this));
+    this.fastify.post(`${basePath}/message`, this.handleMessage.bind(this));
 
     // OAuth discovery — return 404 so Cursor skips OAuth handshake
     this.fastify.get('/.well-known/oauth-authorization-server', async (_req, reply) => {
@@ -125,10 +131,11 @@ export class HTTPServer {
       server: 'CSP AI Agent MCP Server',
       version: '1.0.0',
       transport: 'sse',
+      basePath: basePath || '(none)',
       endpoints: {
-        health: 'GET /health',
-        sse: 'GET /sse',
-        message: 'POST /message?sessionId=<id>',
+        health:  `GET ${basePath}/health`,
+        sse:     `GET ${basePath}/sse`,
+        message: `POST ${basePath}/message?sessionId=<id>`,
       },
     }));
   }
@@ -142,11 +149,30 @@ export class HTTPServer {
    * A fresh instance is created per SSE connection so that each session is
    * isolated (matching ACM's createMCPServer-per-connection pattern).
    */
-  private createMcpServer(userId?: string, email?: string, groups?: string[]): Server {
+  private createMcpServer(userId?: string, email?: string, groups?: string[], userToken?: string): Server {
     const server = new Server(
       { name: 'csp-ai-agent-mcp', version: '0.2.0' },
-      { capabilities: { tools: {} } }
+      // Declare resources capability so Cursor does not emit "Method not found"
+      // when it probes prompt:// URIs via the resources/read protocol.
+      { capabilities: { tools: {}, prompts: {}, resources: {} } }
     );
+
+    // Install Prompt list/get handlers synchronously on this Server instance.
+    // Pass userToken so GetPrompt can attribute telemetry to the correct user.
+    promptManager.installHandlers(server, userToken);
+
+    // resources/list — return an empty list; we don't publish static resources.
+    server.setRequestHandler(ListResourcesRequestSchema, () => ({ resources: [] }));
+
+    // resources/read — Cursor probes `prompt://<name>` URIs to check if a
+    // prompt can be read as a resource.  Return an empty text content so the
+    // client does not display an error; it will fall back to prompts/get for
+    // actual content.
+    server.setRequestHandler(ReadResourceRequestSchema, (request) => {
+      const uri = request.params.uri;
+      logger.debug({ uri }, 'resources/read probe received — returning empty content');
+      return { contents: [{ uri, text: '' }] };
+    });
 
     // tools/list
     server.setRequestHandler(ListToolsRequestSchema, () => ({
@@ -157,7 +183,10 @@ export class HTTPServer {
     // Runs in the background so it never blocks the connection setup.
     server.oninitialized = () => {
       logger.info({ userId }, 'MCP initialized — triggering background sync_resources');
-      syncResources({ mode: 'incremental', scope: 'global' }).then((result) => {
+      // Flush any pending telemetry immediately on (re)connect so events from
+      // before a disconnect are not held until the next 10-second tick.
+      telemetry.flushOnReconnect();
+      syncResources({ mode: 'incremental', scope: 'global', user_token: userToken }).then((result) => {
         if (result.success) {
           logger.info(
             { userId, synced: result.data?.summary?.synced, cached: result.data?.summary?.cached },
@@ -186,8 +215,17 @@ export class HTTPServer {
         }
       }
 
+      // Inject the authenticated token so every tool can call the CSP API without
+      // requiring the AI to know about or pass user_token explicitly.
+      // The AI-supplied user_token (if any) takes precedence; otherwise we fall back
+      // to the token from the SSE connection that created this session.
+      const enrichedArgs: Record<string, unknown> = {
+        user_token: userToken,
+        ...args,
+      };
+
       try {
-        const result = await toolRegistry.callTool(name, args as Record<string, unknown>);
+        const result = await toolRegistry.callTool(name, enrichedArgs);
         const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
         return { content: [{ type: 'text' as const, text }] };
       } catch (err) {
@@ -224,6 +262,11 @@ export class HTTPServer {
       return;
     }
 
+    // Update telemetry with the authenticated token so flush() can report even
+    // when CSP_API_TOKEN is not injected via process env (SSE transport delivers
+    // the token through the Authorization header, not via mcp.json env injection).
+    telemetry.setUserToken(token);
+
     try {
       // Keep our session manager in sync for health/monitoring endpoints
       const sessionOptions = request.user
@@ -249,8 +292,15 @@ export class HTTPServer {
         }
       }, 30_000);
 
-      // Create SDK transport — it takes ownership of reply.raw
-      const transport = new SSEServerTransport('/message', reply.raw);
+      // Build the absolute message URL for the SSE endpoint event.
+      // Cursor (and other MCP clients) resolve the endpoint event data as a URL;
+      // using a relative path causes some clients to misinterpret it as a redirect.
+      // We use the Host header when available so the URL matches what the client
+      // actually connected to (important behind proxies / ngrok / etc.).
+      const basePath = config.http?.basePath ?? '';
+      const host = request.headers.host ?? `${config.http?.host ?? '127.0.0.1'}:${config.http?.port ?? 3000}`;
+      const messageUrl = `http://${host}${basePath}/message`;
+      const transport = new SSEServerTransport(messageUrl, reply.raw);
       const sdkSessionId = transport.sessionId;
       this.sseTransports.set(sdkSessionId, transport);
 
@@ -269,7 +319,8 @@ export class HTTPServer {
       const mcpServer = this.createMcpServer(
         request.user?.userId,
         request.user?.email,
-        request.user?.groups
+        request.user?.groups,
+        token,
       );
       await mcpServer.connect(transport);
 
@@ -377,13 +428,14 @@ export class HTTPServer {
     try {
       const host = config.http?.host || '0.0.0.0';
       const port = config.http?.port || 3000;
+      const basePath = config.http?.basePath ?? '';
 
       await this.fastify.listen({ host, port });
 
-      logger.info({ host, port }, 'HTTP server started');
-      logger.info(`Health check: http://${host}:${port}/health`);
-      logger.info(`SSE endpoint:  http://${host}:${port}/sse`);
-      logger.info(`Message endpoint: http://${host}:${port}/message?sessionId=<id>`);
+      logger.info({ host, port, basePath }, 'HTTP server started');
+      logger.info(`Health check: http://${host}:${port}${basePath}/health`);
+      logger.info(`SSE endpoint:  http://${host}:${port}${basePath}/sse`);
+      logger.info(`Message endpoint: http://${host}:${port}${basePath}/message?sessionId=<id>`);
     } catch (error) {
       logger.error({ error }, 'Failed to start HTTP server');
       throw error;

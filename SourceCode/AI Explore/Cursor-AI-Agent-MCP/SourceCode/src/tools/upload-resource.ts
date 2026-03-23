@@ -18,10 +18,24 @@ import { logger, logToolCall } from '../utils/logger';
 import { apiClient } from '../api/client';
 import { resourceLoader } from '../resources';
 import { MCPServerError, createValidationError } from '../types/errors';
+import { promptManager } from '../prompts/index.js';
 import type { UploadResourceParams, UploadResourceResult, ToolResult, FileEntry } from '../types/tools';
 import type { ResourceType } from '../types/resources';
 
 type ResourceCategory = 'command' | 'skill' | 'rule' | 'mcp';
+
+/** Extract the `description` field from YAML frontmatter (--- ... ---) in Markdown content. */
+function extractFrontmatterDescription(content: string): string | undefined {
+  if (!content.startsWith('---')) return undefined;
+  const end = content.indexOf('\n---', 3);
+  if (end === -1) return undefined;
+  const frontmatter = content.slice(3, end);
+  for (const line of frontmatter.split('\n')) {
+    const match = /^description:\s*(.+)$/.exec(line.trim());
+    if (match) return match[1]!.trim().replace(/^['"]|['"]$/g, '');
+  }
+  return undefined;
+}
 
 /**
  * Infer the resource type from the uploaded file list ONLY when the user has
@@ -254,6 +268,41 @@ export async function uploadResource(params: unknown): Promise<ToolResult<Upload
 
     logger.info({ finalResourceId, version, commitHash }, 'Upload finalized successfully');
 
+    // For Command / Skill: register the uploaded content as an MCP Prompt immediately,
+    // so the user can invoke it via slash-command without a full sync cycle.
+    if (resourceType === 'command' || resourceType === 'skill') {
+      try {
+        const primaryFile = resourceType === 'skill'
+          ? (fileEntries.find((f) => path.basename(f.path) === 'SKILL.md') ??
+             fileEntries.find((f) => f.path.endsWith('.md')) ??
+             fileEntries[0])
+          : (fileEntries.find((f) => path.basename(f.path).replace(/\.md$/, '') === resourceName) ??
+             fileEntries.find((f) => f.path.endsWith('.md')) ??
+             fileEntries[0]);
+
+        const rawContent = primaryFile?.content ?? '';
+        const team = (typedParams as any).team ?? 'general';
+        const frontmatterDesc = extractFrontmatterDescription(rawContent);
+        const description = frontmatterDesc ?? typedParams.message ?? resourceName;
+
+        await promptManager.registerPrompt({
+          resource_id: finalResourceId,
+          resource_type: resourceType as 'command' | 'skill',
+          resource_name: resourceName,
+          team,
+          description,
+          rawContent,
+        });
+        logger.info({ finalResourceId, resourceType }, 'MCP Prompt registered after upload');
+      } catch (promptErr) {
+        // Non-fatal: the resource is uploaded; Prompt registration is best-effort.
+        logger.warn(
+          { finalResourceId, error: (promptErr as Error).message },
+          'MCP Prompt registration after upload failed (non-fatal)',
+        );
+      }
+    }
+
     const result: UploadResourceResult = {
       resource_id: finalResourceId,
       version,
@@ -308,8 +357,7 @@ export const uploadResourceTool = {
     'path must be the original filename as-is (relative, no path traversal). ' +
     'No restriction on file extensions — mcp packages may include .py, .js, package.json, etc.\n' +
 
-    '\nIMPORTANT: Always read the CSP_API_TOKEN from the user\'s environment and pass it as user_token ' +
-    'so that each user\'s API calls use their own identity.',
+    '\nThe user_token is injected automatically by the server — do NOT read or pass it manually.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -373,9 +421,8 @@ export const uploadResourceTool = {
       user_token: {
         type: 'string',
         description:
-          'CSP API token for the current user. Read this from the CSP_API_TOKEN environment ' +
-          'variable configured in the user\'s mcp.json. When provided, this token is used ' +
-          'for all CSP API calls in this request instead of the server-level fallback token.',
+          'DO NOT set this field — it is automatically injected by the MCP server from ' +
+          'the authenticated SSE connection. The server always provides the correct token.',
       },
     },
     required: ['resource_id', 'message', 'files'],
