@@ -150,9 +150,8 @@ export class PromptManager {
           : undefined;
 
       // Fire-and-forget telemetry recording attributed to the calling user.
-      // userToken is captured from the SSE connection at handler-install time;
-      // fall back to the env token for stdio / test scenarios.
-      const effectiveToken = userToken ?? process.env.CSP_API_TOKEN ?? '';
+      // userToken is captured from the SSE connection at handler-install time.
+      const effectiveToken = userToken ?? '';
       if (effectiveToken) {
         telemetry
           .recordInvocation(meta.resource_id, meta.resource_type, meta.resource_name, effectiveToken, jiraId)

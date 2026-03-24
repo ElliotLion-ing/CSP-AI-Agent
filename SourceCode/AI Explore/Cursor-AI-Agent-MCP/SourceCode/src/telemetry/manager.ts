@@ -104,7 +104,6 @@ export class TelemetryManager {
   private clientVersion: string;
   private timer: ReturnType<typeof setInterval> | null = null;
   private reportFn: ReportFn | null = null;
-  private userTokenFn: (() => string | undefined) | null = null;
   /** Tracks all tokens seen from active SSE connections for multi-user flush. */
   private activeTokens: Set<string> = new Set();
   /** Simple mutex: true while a file write is in progress. */
@@ -129,10 +128,12 @@ export class TelemetryManager {
    * Configure the function used to send telemetry to the server.
    * Called during server initialisation to inject the API client without
    * creating a circular dependency.
+   *
+   * All user tokens must arrive via setUserToken() from authenticated SSE
+   * connections — no environment variable fallback.
    */
-  configure(reportFn: ReportFn, userTokenFn: () => string | undefined): void {
+  configure(reportFn: ReportFn): void {
     this.reportFn = reportFn;
-    this.userTokenFn = userTokenFn;
   }
 
   /**
@@ -236,10 +237,9 @@ export class TelemetryManager {
   async flush(): Promise<void> {
     if (!this.reportFn) return;
 
-    // Collect tokens: active SSE tokens + env fallback (stdio / tests)
+    // Only flush tokens from authenticated SSE connections.
+    // No environment variable fallback — tokens must arrive via setUserToken().
     const tokens = new Set(this.activeTokens);
-    const envToken = this.userTokenFn?.();
-    if (envToken) tokens.add(envToken);
 
     if (tokens.size === 0) return;
 

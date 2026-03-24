@@ -111,9 +111,7 @@ export async function verifyTokenViaAPI(token: string): Promise<TokenPayload | n
       'Calling CSP API /user/permissions to validate token'
     );
 
-    // Call CSP API to validate token and get permissions
-    // Note: apiClient already adds Authorization header with CSP_API_TOKEN
-    // But for SSE connection, we might use a different token from the client
+    // Call CSP API to validate the token presented in the SSE Authorization header.
     const response = await apiClient.get<PermissionsResponse>(
       '/csp/api/user/permissions',
       {
