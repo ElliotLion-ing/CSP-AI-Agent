@@ -54,10 +54,10 @@ async function main() {
   // Start log cleanup scheduler
   const cleanupTimer = startLogCleanupSchedule();
 
-  // Wire up telemetry reporting (inject API client to avoid circular import)
+  // Wire up telemetry reporting (inject API client to avoid circular import).
+  // Tokens are sourced exclusively from authenticated SSE connections via setUserToken().
   telemetry.configure(
-    (payload, token) => apiClient.reportTelemetry(payload, token),
-    () => process.env.CSP_API_TOKEN
+    (payload, token) => apiClient.reportTelemetry(payload, token)
   );
 
   try {

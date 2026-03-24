@@ -26,16 +26,15 @@ class APIClient {
     // Request interceptor for authentication and logging.
     // Every request MUST carry a per-request Authorization header supplied by
     // the caller via authConfig(userToken). If none is present the request is
-    // rejected immediately with a clear error so the caller knows they must
-    // configure their token in mcp.json under env.CSP_API_TOKEN.
+    // rejected immediately — the token must come from the authenticated SSE
+    // connection, not from environment variables.
     this.client.interceptors.request.use(
       (requestConfig) => {
         if (!requestConfig.headers.Authorization) {
           return Promise.reject(
             new Error(
               'Authorization token is missing. ' +
-              'Ensure the MCP server is connected via SSE with a valid Bearer token in the Authorization header. ' +
-              'Check that your mcp.json has the correct "headers": {"Authorization": "Bearer <token>"} configured.'
+              'Ensure the MCP server is connected via SSE with a valid Bearer token in the Authorization header.'
             )
           );
         }

@@ -262,9 +262,8 @@ export class HTTPServer {
       return;
     }
 
-    // Update telemetry with the authenticated token so flush() can report even
-    // when CSP_API_TOKEN is not injected via process env (SSE transport delivers
-    // the token through the Authorization header, not via mcp.json env injection).
+    // Register the authenticated token so flush() can report telemetry for this user.
+    // The token comes from the SSE Authorization header and is the single source of truth.
     telemetry.setUserToken(token);
 
     try {

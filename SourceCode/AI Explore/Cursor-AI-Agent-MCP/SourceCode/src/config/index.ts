@@ -62,10 +62,10 @@ export interface Config {
   // CSP API
   csp: {
     apiBaseUrl: string;
-    // NOTE: No apiToken here. The user token comes from mcp.json env.CSP_API_TOKEN,
-    // which Cursor injects into the process environment at startup. Each tool call
-    // receives it via the user_token argument; telemetry reads process.env.CSP_API_TOKEN
-    // directly. Storing it in config would encourage incorrect singleton-token patterns.
+    // NOTE: No apiToken here. The user token is established during the first MCP
+    // connection (SSE Authorization header), validated, then cached per-session.
+    // Each tool call receives it via the injected user_token argument.
+    // Storing a static token in config would break multi-user scenarios.
     timeout: number;
   };
 
