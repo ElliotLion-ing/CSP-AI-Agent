@@ -120,7 +120,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             // Extract resource name from the ID (cmd-<team>-<name> or skill-<team>-<name>).
             const parts = resourceId.split('-');
             const resourceName = parts.slice(2).join('-') || resourceId;
-            promptManager.unregisterPrompt(resourceId, resourceType as 'command' | 'skill', resourceName);
+            promptManager.unregisterPrompt(resourceId, resourceType as 'command' | 'skill', resourceName, typedParams.user_token ?? '');
             uninstallResults.push({ id: resourceId, removed: true, detail: `Unregistered MCP Prompt for "${resourceName}"` });
             logger.info({ resourceId, resourceType }, 'MCP Prompt unregistered on unsubscribe');
             continue;

@@ -130,6 +130,11 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
     // Accumulated local file-system actions the AI must perform on the user's machine.
     const localActions: LocalAction[] = [];
 
+    // Track which prompt names are expected from the current subscription list.
+    // After the loop, any prompt registered in PromptManager but NOT in this set
+    // is stale (from a previous connection / subscription change) and will be pruned.
+    const expectedPromptNames = new Set<string>();
+
     for (let i = 0; i < subscriptions.subscriptions.length; i++) {
       const sub = subscriptions.subscriptions[i];
       if (!sub) continue;
@@ -228,14 +233,20 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               (sub as any).description ??
               sub.name;
 
-            await promptManager.registerPrompt({
+            const meta = {
               resource_id: sub.id,
               resource_type: sub.type as 'command' | 'skill',
               resource_name: sub.name,
               team: (sub as any).team ?? 'general',
               description,
               rawContent,
-            });
+            };
+            // userToken is required so the prompt is scoped to this user's namespace.
+            const effectiveToken = userToken ?? '';
+            await promptManager.registerPrompt(meta, effectiveToken);
+
+            // Track this prompt name so stale prompts can be pruned after the loop.
+            expectedPromptNames.add(promptManager.buildPromptName(meta));
 
             // Clean up any legacy local files that may have been written by an
             // older version of sync_resources.  Command/Skill resources are now
@@ -256,7 +267,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             details.push({ id: sub.id, name: sub.name, action: 'synced', version: resourceVersion });
             logToolStep('sync_resources', `${sub.type} registered as MCP Prompt`, {
               resourceId: sub.id,
-              promptCount: promptManager.size,
+              promptCount: promptManager.sizeFor(userToken ?? ''),
             });
           } catch (promptErr) {
             logger.error(
@@ -533,7 +544,16 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
       }
     }
 
-    // ── Step 4: Health score ───────────────────────────────────────────────
+    // ── Step 4: Prune stale prompts ────────────────────────────────────────
+    // Remove any prompt registered in a previous session that is no longer in
+    // the current subscription list.  This prevents prompt count from growing
+    // unboundedly across reconnections.
+    // In 'check' mode we skip pruning — we never registered any prompts above.
+    if (mode !== 'check') {
+      promptManager.pruneStalePrompts(expectedPromptNames, userToken ?? '');
+    }
+
+    // ── Step 5: Health score ───────────────────────────────────────────────
     const healthScore = tally.total > 0
       ? Math.round(((tally.synced + tally.cached) / tally.total) * 100)
       : 100;

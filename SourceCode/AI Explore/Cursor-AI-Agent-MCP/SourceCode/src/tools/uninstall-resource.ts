@@ -29,7 +29,7 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
 
     // ── Command / Skill: unregister MCP Prompt + delete cache ─────────────
     // Match registered prompt names that contain the pattern.
-    const matchedPromptNames = promptManager.promptNames().filter(
+    const matchedPromptNames = promptManager.promptNames(typedParams.user_token ?? '').filter(
       (name) => name === pattern || name.includes(pattern),
     );
 
@@ -50,7 +50,7 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
         // Unregister from the in-memory prompt registry only.
         // The server-side .prompt-cache/ files are intentionally NOT deleted here —
         // they are shared across all users and will be regenerated on the next git pull.
-        promptManager.unregisterPrompt(resourceId, resourceType ?? 'command', resourceName);
+        promptManager.unregisterPrompt(resourceId, resourceType ?? 'command', resourceName, typedParams.user_token ?? '');
 
         removedResources.push({ id: resourceId, name: resourceName, path: `[MCP Prompt: ${promptName}]` });
         logger.info({ promptName, team, resourceType, resourceName }, 'MCP Prompt unregistered via uninstall');

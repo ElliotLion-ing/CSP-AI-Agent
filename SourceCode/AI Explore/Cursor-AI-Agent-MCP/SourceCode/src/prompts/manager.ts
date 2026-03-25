@@ -48,8 +48,15 @@ interface RegisteredPrompt {
 }
 
 export class PromptManager {
-  /** In-memory store: prompt name → prompt metadata. */
-  private readonly prompts = new Map<string, RegisteredPrompt>();
+  /**
+   * Per-user prompt store: userToken → (promptName → RegisteredPrompt).
+   *
+   * Keeping prompts scoped to each user's token ensures that a ListPrompts
+   * request for user A never leaks user B's resources and vice-versa.
+   * The anonymous fallback key '' is used for non-authenticated connections.
+   */
+  private readonly userPrompts = new Map<string, Map<string, RegisteredPrompt>>();
+
   /**
    * Tracks which Server instances already have handlers installed.
    * Each SSE connection creates a new Server instance, so we track per-instance
@@ -57,6 +64,16 @@ export class PromptManager {
    * subsequent connections and cause "Method not found" errors).
    */
   private readonly installedServers = new WeakSet<Server>();
+
+  /** Return (or lazily create) the prompt Map for a given user token. */
+  private promptsFor(userToken: string): Map<string, RegisteredPrompt> {
+    let map = this.userPrompts.get(userToken);
+    if (!map) {
+      map = new Map();
+      this.userPrompts.set(userToken, map);
+    }
+    return map;
+  }
 
   // ---------------------------------------------------------------------------
   // Prompt name helpers
@@ -96,12 +113,14 @@ export class PromptManager {
     if (this.installedServers.has(server)) return;
     this.installedServers.add(server);
 
-    // List all registered prompts.
+    // List prompts for THIS connection's user only.
     // A fixed setup prompt is always injected at the top of the list so that
     // Cursor's AI Agent picks it up on connection and performs the initial sync,
     // which writes Rule files and MCP entries to the user's local machine.
     server.setRequestHandler(ListPromptsRequestSchema, () => {
-      const resourcePrompts = Array.from(this.prompts.values()).map(({ name, description }) => ({
+      const token = userToken ?? '';
+      const userMap = this.promptsFor(token);
+      const resourcePrompts = Array.from(userMap.values()).map(({ name, description }) => ({
         name,
         description,
         arguments: [
@@ -128,8 +147,9 @@ export class PromptManager {
           setupPromptIncluded: true,
           resourcePromptCount: resourcePrompts.length,
           resourcePromptNames: resourcePrompts.map((p) => p.name),
+          userTokenPrefix: token ? `${token.slice(0, 12)}...` : 'anonymous',
         },
-        'ListPrompts called — csp-ai-agent-setup injected as first entry',
+        'ListPrompts called — returning prompts for this connection\'s user only',
       );
       return { prompts };
     });
@@ -140,11 +160,12 @@ export class PromptManager {
 
       // ── Setup prompt: drives initial sync + local action execution ───────────
       if (name === 'csp-ai-agent-setup') {
+        const setupToken = userToken ?? '';
         logger.info(
           {
             promptName: name,
-            userToken: userToken ? `${userToken.slice(0, 12)}...` : 'none',
-            registeredPromptCount: this.prompts.size,
+            userToken: setupToken ? `${setupToken.slice(0, 12)}...` : 'none',
+            registeredPromptCount: this.promptsFor(setupToken).size,
           },
           'GetPrompt: serving csp-ai-agent-setup — AI will sync resources and apply local actions',
         );
@@ -186,13 +207,16 @@ export class PromptManager {
         };
       }
 
-      const registered = this.prompts.get(name);
+      const token = userToken ?? '';
+      const userMap = this.promptsFor(token);
+      const registered = userMap.get(name);
 
       logger.info(
         {
           requestedName: name,
-          registeredNames: Array.from(this.prompts.keys()),
+          registeredNames: Array.from(userMap.keys()),
           found: !!registered,
+          userTokenPrefix: token ? `${token.slice(0, 12)}...` : 'anonymous',
         },
         'GetPrompt request received',
       );
@@ -312,10 +336,19 @@ export class PromptManager {
     );
   }
 
-  async registerPrompt(meta: PromptResourceMeta): Promise<void> {
+  /**
+   * Register (or refresh) a single resource as an MCP Prompt for a specific user.
+   * Generates the intermediate cache file and adds the prompt to the user's registry.
+   * Safe to call for an already-registered prompt — it will update the entry.
+   *
+   * @param meta      Resource metadata including content.
+   * @param userToken The token of the user subscribing this prompt.
+   */
+  async registerPrompt(meta: PromptResourceMeta, userToken: string): Promise<void> {
     const name = this.buildPromptName(meta);
 
-    // Generate and write the intermediate cache file.
+    // Generate and write the intermediate cache file (shared across users since
+    // content is the same; only the in-memory registry is per-user).
     try {
       const tmpBase = promptCache.directory;
       promptCache.ensureDir();
@@ -334,50 +367,70 @@ export class PromptManager {
       );
     }
 
-    this.prompts.set(name, {
+    const userMap = this.promptsFor(userToken);
+    userMap.set(name, {
       name,
       description: meta.description,
       meta,
     });
 
     logger.info(
-      { promptName: name, resourceId: meta.resource_id },
-      'Prompt registered',
+      {
+        promptName: name,
+        resourceId: meta.resource_id,
+        userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
+        userPromptCount: userMap.size,
+      },
+      'Prompt registered for user',
     );
   }
 
   /**
-   * Unregister a prompt and delete its cache file.
+   * Unregister a prompt for a specific user.
    * @param resourceId   The canonical resource ID.
    * @param resourceType 'command' | 'skill'
    * @param resourceName Resource name (used to reconstruct the prompt name).
+   * @param userToken    The token of the user to remove the prompt from.
    */
   unregisterPrompt(
     resourceId: string,
     resourceType: 'command' | 'skill',
     resourceName: string,
+    userToken: string,
   ): void {
     const name = this.buildPromptName({ resource_type: resourceType, resource_name: resourceName });
-    this.prompts.delete(name);
-    promptCache.delete(resourceType, resourceId);
-    logger.info({ promptName: name, resourceId }, 'Prompt unregistered');
+    const userMap = this.promptsFor(userToken);
+    userMap.delete(name);
+    // Only delete the cache file if no other user has this same resource registered.
+    const stillInUse = Array.from(this.userPrompts.values()).some((m) => m.has(name));
+    if (!stillInUse) {
+      promptCache.delete(resourceType, resourceId);
+    }
+    logger.info(
+      {
+        promptName: name,
+        resourceId,
+        userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
+      },
+      'Prompt unregistered for user',
+    );
   }
 
   /**
-   * Refresh a prompt's cached content and description.
+   * Refresh a prompt's cached content and description for a specific user.
    * Equivalent to calling registerPrompt() again.
    */
-  async refreshPrompt(meta: PromptResourceMeta): Promise<void> {
-    return this.registerPrompt(meta);
+  async refreshPrompt(meta: PromptResourceMeta, userToken: string): Promise<void> {
+    return this.registerPrompt(meta, userToken);
   }
 
   /**
-   * Re-register all provided resources as MCP Prompts.
-   * Existing prompts NOT in the list are NOT removed (use unregisterPrompt for that).
+   * Re-register all provided resources as MCP Prompts for a specific user.
+   * Existing prompts NOT in the list are NOT removed (use pruneStalePrompts for that).
    */
-  async refreshAllPrompts(resources: PromptResourceMeta[]): Promise<void> {
+  async refreshAllPrompts(resources: PromptResourceMeta[], userToken: string): Promise<void> {
     const results = await Promise.allSettled(
-      resources.map((meta) => this.registerPrompt(meta)),
+      resources.map((meta) => this.registerPrompt(meta, userToken)),
     );
 
     const failures = results.filter((r) => r.status === 'rejected');
@@ -391,19 +444,77 @@ export class PromptManager {
     }
   }
 
-  /** Return the number of currently registered prompts. */
+  /** Return the number of currently registered prompts for a given user. */
+  sizeFor(userToken: string): number {
+    return this.promptsFor(userToken).size;
+  }
+
+  /** Return the total number of registered prompts across all users. */
   get size(): number {
-    return this.prompts.size;
+    let total = 0;
+    for (const m of this.userPrompts.values()) total += m.size;
+    return total;
   }
 
-  /** Check if a prompt with the given name is currently registered. */
-  has(promptName: string): boolean {
-    return this.prompts.has(promptName);
+  /** Check if a prompt with the given name is currently registered for a user. */
+  has(promptName: string, userToken: string): boolean {
+    return this.promptsFor(userToken).has(promptName);
   }
 
-  /** Return a snapshot of all registered prompt names. */
-  promptNames(): string[] {
-    return Array.from(this.prompts.keys());
+  /** Return a snapshot of all registered prompt names for a given user. */
+  promptNames(userToken: string): string[] {
+    return Array.from(this.promptsFor(userToken).keys());
+  }
+
+  /**
+   * Remove any prompts for a specific user whose names are NOT in the provided
+   * set of expected prompt names built from the current subscription list.
+   *
+   * Call this after every sync_resources run to prevent stale prompts from
+   * accumulating across subscription changes.
+   *
+   * @param expectedNames Set of prompt names that SHOULD exist for this user.
+   * @param userToken     The token identifying the user's prompt namespace.
+   */
+  pruneStalePrompts(expectedNames: Set<string>, userToken: string): void {
+    const userMap = this.promptsFor(userToken);
+    const before = userMap.size;
+    const pruned: string[] = [];
+
+    for (const [name, prompt] of userMap.entries()) {
+      if (!expectedNames.has(name)) {
+        userMap.delete(name);
+        // Only delete cache if no other user still has this resource.
+        const stillInUse = Array.from(this.userPrompts.values()).some((m) => m.has(name));
+        if (!stillInUse) {
+          promptCache.delete(prompt.meta.resource_type, prompt.meta.resource_id);
+        }
+        pruned.push(name);
+      }
+    }
+
+    if (pruned.length > 0) {
+      logger.info(
+        {
+          prunedCount: pruned.length,
+          prunedNames: pruned,
+          before,
+          after: userMap.size,
+          expectedCount: expectedNames.size,
+          userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
+        },
+        'PromptManager: pruned stale prompts for user',
+      );
+    } else {
+      logger.info(
+        {
+          promptCount: userMap.size,
+          expectedCount: expectedNames.size,
+          userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
+        },
+        'PromptManager: no stale prompts to prune for user',
+      );
+    }
   }
 }
 

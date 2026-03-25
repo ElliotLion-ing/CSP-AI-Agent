@@ -292,7 +292,7 @@ export async function uploadResource(params: unknown): Promise<ToolResult<Upload
           team,
           description,
           rawContent,
-        });
+        }, userToken ?? '');
         logger.info({ finalResourceId, resourceType }, 'MCP Prompt registered after upload');
       } catch (promptErr) {
         // Non-fatal: the resource is uploaded; Prompt registration is best-effort.
