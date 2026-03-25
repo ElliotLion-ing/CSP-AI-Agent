@@ -315,15 +315,69 @@ export class HTTPServer {
       // See config/index.ts for details.
       const basePath = config.http?.basePath ?? '';
       const publicOrigin = config.http?.publicOrigin ?? `http://127.0.0.1:${config.http?.port ?? 3000}`;
-
-      // We pass only the path to SSEServerTransport so its internal URL
-      // parsing produces a clean relative URL.  After connect() we re-send
-      // an absolute endpoint event so Cursor (which may sit behind a proxy
-      // with a different origin than its SSE connection) uses the correct
-      // public address for all subsequent JSON-RPC POST messages.
       const messagePath = `${basePath}/message`;
-      const transport = new SSEServerTransport(messagePath, reply.raw);
+
+      // The MCP SDK SSEServerTransport.start() emits an `endpoint` SSE event
+      // whose data is a *relative* path (pathname + ?sessionId=...), stripping
+      // the origin.  When deployed behind nginx, Cursor resolves this relative
+      // path against whatever origin it used to open the SSE connection, which
+      // may differ from our public API origin.  The result is that GetPrompt /
+      // tools/call POST requests go to the wrong address and never arrive.
+      //
+      // Fix: intercept the raw response stream's write() method.  When the SDK
+      // emits the relative endpoint event we replace it on-the-fly with the
+      // full absolute URL so Cursor always uses the correct public address.
+      // Only ONE endpoint event is ever written to the wire this way.
+      const rawRes = reply.raw;
+      const originalWrite = rawRes.write.bind(rawRes);
+      (rawRes as NodeJS.WritableStream & { write: typeof originalWrite }).write = (
+        chunk: unknown,
+        encodingOrCb?: unknown,
+        cb?: unknown,
+      ): boolean => {
+        if (typeof chunk === 'string' && chunk.startsWith('event: endpoint\ndata:')) {
+          // The SDK wrote a relative endpoint event — replace with absolute URL.
+          // We know the sessionId from transport.sessionId (read after construction).
+          // Use a placeholder here; replaced below once we have the transport.
+          // (This interceptor is set before connect(), so the write happens during
+          //  connect() → transport.start().)
+          chunk = chunk.replace(
+            /^(event: endpoint\ndata:).*/,
+            `$1 ${publicOrigin}${messagePath}?sessionId=__SESSION_ID__`,
+          );
+        }
+        if (typeof encodingOrCb === 'function') {
+          return originalWrite(chunk as string, encodingOrCb as () => void);
+        }
+        if (typeof cb === 'function') {
+          return originalWrite(chunk as string, encodingOrCb as BufferEncoding, cb as () => void);
+        }
+        return originalWrite(chunk as string);
+      };
+
+      const transport = new SSEServerTransport(messagePath, rawRes);
       const sdkSessionId = transport.sessionId;
+
+      // Now patch the placeholder with the real sessionId that the SDK assigned.
+      // The write interceptor is still active during connect() → start(), so we
+      // swap it out for a version that knows the actual sessionId.
+      (rawRes as NodeJS.WritableStream & { write: typeof originalWrite }).write = (
+        chunk: unknown,
+        encodingOrCb?: unknown,
+        cb?: unknown,
+      ): boolean => {
+        if (typeof chunk === 'string' && chunk.startsWith('event: endpoint\ndata:')) {
+          chunk = `event: endpoint\ndata: ${publicOrigin}${messagePath}?sessionId=${sdkSessionId}\n\n`;
+        }
+        if (typeof encodingOrCb === 'function') {
+          return originalWrite(chunk as string, encodingOrCb as () => void);
+        }
+        if (typeof cb === 'function') {
+          return originalWrite(chunk as string, encodingOrCb as BufferEncoding, cb as () => void);
+        }
+        return originalWrite(chunk as string);
+      };
+
       this.sseTransports.set(sdkSessionId, transport);
 
       transport.onclose = () => {
@@ -337,29 +391,21 @@ export class HTTPServer {
         logger.warn({ sdkSessionId, error: err.message }, 'SSE transport error');
       };
 
-      // Create a per-connection MCP Server and connect it to the transport.
-      // connect() calls transport.start() which writes the initial (relative)
-      // endpoint SSE event.  We then immediately overwrite it with an absolute
-      // URL so Cursor uses the correct public address regardless of how nginx
-      // forwards the SSE connection.
       const mcpServer = this.createMcpServer(
         request.user?.userId,
         request.user?.email,
         request.user?.groups,
         token,
       );
+
+      // connect() calls transport.start() which triggers the intercepted write()
+      // above — emitting exactly ONE absolute endpoint event to the wire.
       await mcpServer.connect(transport);
 
-      // Re-send the endpoint event with the full absolute URL.
-      // This overwrites the relative-path event emitted by the SDK and
-      // ensures Cursor POSTs subsequent JSON-RPC messages (prompts/get,
-      // tools/call, etc.) to the correct externally-reachable address.
       const absoluteMessageUrl = `${publicOrigin}${messagePath}?sessionId=${sdkSessionId}`;
-      reply.raw.write(`event: endpoint\ndata: ${absoluteMessageUrl}\n\n`);
-
       logger.info(
         { sdkSessionId, absoluteMessageUrl, publicOrigin },
-        'SSE stream established — absolute endpoint event sent',
+        'SSE stream established — absolute endpoint URL intercepted and sent',
       );
 
       // Handle client disconnect
