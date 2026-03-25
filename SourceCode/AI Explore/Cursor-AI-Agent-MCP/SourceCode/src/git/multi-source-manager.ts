@@ -311,7 +311,22 @@ class MultiSourceGitManager {
     resourceName: string,
     resourceType: 'command' | 'skill' | 'rule' | 'mcp',
   ): Promise<Array<{ path: string; content: string }>> {
-    const sources = await this.getEnabledSources();
+    let sources: SourceConfig[];
+    try {
+      sources = await this.getEnabledSources();
+    } catch (configErr) {
+      logger.warn(
+        {
+          resourceName,
+          resourceType,
+          aiResourcesBase: this.baseDir,
+          error: (configErr as Error).message,
+        },
+        'readResourceFiles: failed to load ai-resources-config.json — returning empty. ' +
+        'Set AI_RESOURCES_PATH env var to the directory containing ai-resources-config.json.',
+      );
+      return [];
+    }
     // Sort by priority descending so higher-priority sources win.
     sources.sort((a, b) => b.priority - a.priority);
 
@@ -455,6 +470,55 @@ class MultiSourceGitManager {
   }
 }
 
-// Export singleton instance
-const AI_RESOURCES_BASE = path.resolve(process.cwd(), '../AI-Resources');
+// Resolve the AI-Resources base directory.
+//
+// Resolution order (first existing path wins):
+//   1. AI_RESOURCES_PATH env var (explicit override for production deployments)
+//   2. __dirname-relative path: dist/git/ → ../../AI-Resources
+//      Works when the package is installed as an npm package and run from its
+//      own directory (the common production case after `npm install -g`).
+//   3. process.cwd()-relative path: ../AI-Resources
+//      Works in local development where cwd is SourceCode/.
+//
+// Using __dirname (compiled file location) instead of process.cwd() makes the
+// path robust to being started from any working directory on the server.
+function resolveAiResourcesBase(): string {
+  if (process.env.AI_RESOURCES_PATH) {
+    const explicit = path.resolve(process.env.AI_RESOURCES_PATH);
+    logger.info({ aiResourcesBase: explicit }, 'AI-Resources base resolved from AI_RESOURCES_PATH env');
+    return explicit;
+  }
+
+  // Probe candidate locations in priority order:
+  //
+  //  1. cwd/AI-Resources          — server deployed with cwd = project root (e.g. /app)
+  //                                  and AI-Resources/ is a sibling of dist/
+  //  2. cwd/../AI-Resources        — local dev: cwd = SourceCode/, AI-Resources/ is one level up
+  //  3. __dirname/../../AI-Resources — npm global install: dist/git/ → ../../AI-Resources
+  //     (resolves to same as #1 when installed as a local package from project root)
+  const candidates = [
+    path.resolve(process.cwd(), 'AI-Resources'),         // production: cwd is package root
+    path.resolve(process.cwd(), '../AI-Resources'),       // local dev: cwd is SourceCode/
+    path.resolve(__dirname, '../../AI-Resources'),        // npm global install fallback
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const configFile = path.join(candidate, 'ai-resources-config.json');
+      require('fs').accessSync(configFile);
+      logger.info({ aiResourcesBase: candidate }, 'AI-Resources base resolved');
+      return candidate;
+    } catch { /* try next */ }
+  }
+
+  // Nothing found — fall back to first candidate and let later errors surface clearly.
+  logger.warn(
+    { triedPaths: candidates },
+    'AI-Resources config not found in any candidate path — using cwd/AI-Resources as fallback. ' +
+    'Set AI_RESOURCES_PATH env var to override.',
+  );
+  return candidates[0] as string;
+}
+
+const AI_RESOURCES_BASE = resolveAiResourcesBase();
 export const multiSourceGitManager = new MultiSourceGitManager(AI_RESOURCES_BASE);
