@@ -52,6 +52,18 @@ export interface Config {
      *  Leave empty (default) for direct / root-path deployments.
      */
     basePath: string;
+    /**
+     * The public-facing origin clients (Cursor) should use when posting
+     * JSON-RPC messages.  Derived from CSP_API_BASE_URL so that teams only
+     * need one URL configured — the API base and the MCP server share the
+     * same external hostname.
+     *
+     * e.g. CSP_API_BASE_URL=https://zct.zoomdev.us  →  publicOrigin=https://zct.zoomdev.us
+     *
+     * Falls back to PUBLIC_URL env var if set, then to the internal
+     * http://host:port when running locally (where 0.0.0.0 == localhost).
+     */
+    publicOrigin: string;
   };
 
   // Session (for SSE transport)
@@ -158,11 +170,34 @@ export function loadConfig(): Config {
       mode: transportMode,
     },
 
-    http: transportMode === 'sse' ? {
-      host: getEnv('HTTP_HOST', '0.0.0.0'),
-      port: getEnvNumber('HTTP_PORT', 3000),
-      basePath: getEnv('HTTP_BASE_PATH', ''),
-    } : undefined,
+    http: transportMode === 'sse' ? (() => {
+      const host     = getEnv('HTTP_HOST', '0.0.0.0');
+      const port     = getEnvNumber('HTTP_PORT', 3000);
+      const basePath = getEnv('HTTP_BASE_PATH', '');
+
+      // Derive the public-facing origin that external clients (Cursor) will use
+      // to POST JSON-RPC messages.  Priority:
+      //   1. PUBLIC_URL env var — explicit override (e.g. ngrok / custom domain)
+      //   2. Origin extracted from CSP_API_BASE_URL — same host as the API
+      //   3. http://host:port — safe for local dev where host==0.0.0.0==localhost
+      const publicUrl = process.env['PUBLIC_URL'];
+      const cspApiBase = process.env['CSP_API_BASE_URL'] ?? '';
+      let publicOrigin: string;
+      if (publicUrl) {
+        publicOrigin = publicUrl.replace(/\/$/, '');
+      } else if (cspApiBase) {
+        try {
+          const u = new URL(cspApiBase);
+          publicOrigin = u.origin; // e.g. "https://zct.zoomdev.us"
+        } catch {
+          publicOrigin = `http://${host}:${port}`;
+        }
+      } else {
+        publicOrigin = `http://${host}:${port}`;
+      }
+
+      return { host, port, basePath, publicOrigin };
+    })() : undefined,
 
     session: transportMode === 'sse' ? {
       timeout: getEnvNumber('SESSION_TIMEOUT', 3600),

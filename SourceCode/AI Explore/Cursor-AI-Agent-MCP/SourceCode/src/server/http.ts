@@ -305,35 +305,19 @@ export class HTTPServer {
       }, 30_000);
 
       // Build the absolute message URL for the SSE endpoint event.
-      // Cursor (and other MCP clients) resolve the endpoint event data as a URL;
-      // using a relative path causes some clients to misinterpret it as a redirect.
+      // Cursor (and other MCP clients) use this URL to POST all subsequent
+      // JSON-RPC messages (tools/call, prompts/get, etc.).
       //
-      // Priority order for determining the public base URL:
-      //   1. PUBLIC_URL env var — explicit override for reverse-proxy / Docker deployments
-      //      where the Host header reflects the internal address (e.g. 0.0.0.0:5080)
-      //      rather than the externally reachable hostname.
-      //      Set this to the full external origin, e.g. https://mcp.example.com
-      //   2. X-Forwarded-Host / X-Forwarded-Proto headers — set by well-configured proxies
-      //   3. Host header from the incoming request (may be the internal address behind nginx)
-      //   4. Fallback to HTTP_HOST:HTTP_PORT from config
+      // publicOrigin is resolved at startup from (in priority order):
+      //   1. PUBLIC_URL env var
+      //   2. Origin extracted from CSP_API_BASE_URL (same host as the API)
+      //   3. http://HTTP_HOST:HTTP_PORT (safe for local dev)
+      // See config/index.ts for details.
       const basePath = config.http?.basePath ?? '';
-      let messageUrl: string;
+      const publicOrigin = config.http?.publicOrigin ?? `http://127.0.0.1:${config.http?.port ?? 3000}`;
+      const messageUrl = `${publicOrigin}${basePath}/message`;
 
-      const publicUrl = process.env['PUBLIC_URL'];
-      if (publicUrl) {
-        // Strip trailing slash, then append basePath + /message
-        messageUrl = `${publicUrl.replace(/\/$/, '')}${basePath}/message`;
-      } else {
-        const forwardedProto = request.headers['x-forwarded-proto'];
-        const forwardedHost  = request.headers['x-forwarded-host'];
-        const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : (forwardedProto ?? 'http');
-        const host  = Array.isArray(forwardedHost)
-          ? forwardedHost[0]
-          : (forwardedHost ?? request.headers.host ?? `${config.http?.host ?? '127.0.0.1'}:${config.http?.port ?? 3000}`);
-        messageUrl = `${proto}://${host}${basePath}/message`;
-      }
-
-      logger.info({ messageUrl }, 'Message endpoint constructed for SSE client');
+      logger.info({ messageUrl, publicOrigin }, 'Message endpoint constructed for SSE client');
       const transport = new SSEServerTransport(messageUrl, reply.raw);
       const sdkSessionId = transport.sessionId;
       this.sseTransports.set(sdkSessionId, transport);
@@ -466,10 +450,14 @@ export class HTTPServer {
 
       await this.fastify.listen({ host, port });
 
-      logger.info({ host, port, basePath }, 'HTTP server started');
-      logger.info(`Health check: http://${host}:${port}${basePath}/health`);
-      logger.info(`SSE endpoint:  http://${host}:${port}${basePath}/sse`);
-      logger.info(`Message endpoint: http://${host}:${port}${basePath}/message?sessionId=<id>`);
+      const publicOrigin = config.http?.publicOrigin ?? `http://${host}:${port}`;
+      logger.info({ host, port, basePath, publicOrigin }, 'HTTP server started');
+      // Internal listen address (for ops/infra):
+      logger.info(`Listening on: http://${host}:${port}${basePath}`);
+      // Public-facing addresses (what Cursor clients will use):
+      logger.info(`[Public] Health check:    ${publicOrigin}${basePath}/health`);
+      logger.info(`[Public] SSE endpoint:    ${publicOrigin}${basePath}/sse`);
+      logger.info(`[Public] Message endpoint: ${publicOrigin}${basePath}/message?sessionId=<id>`);
     } catch (error) {
       logger.error({ error }, 'Failed to start HTTP server');
       throw error;
