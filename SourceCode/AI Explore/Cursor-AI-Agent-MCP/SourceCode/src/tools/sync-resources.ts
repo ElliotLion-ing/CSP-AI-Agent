@@ -21,7 +21,11 @@ import * as path from 'path';
 import { logger, logToolCall, logToolStep, logToolResult } from '../utils/logger';
 import { apiClient } from '../api/client';
 import { multiSourceGitManager } from '../git/multi-source-manager';
-import { getCursorResourcePath, getCursorTypeDir, getCursorRootDir } from '../utils/cursor-paths';
+import {
+  getCursorResourcePath,
+  getCursorTypeDirForClient,
+  getCursorRootDirForClient,
+} from '../utils/cursor-paths';
 import { MCPServerError } from '../types/errors';
 import type {
   SyncResourcesParams,
@@ -283,8 +287,8 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
         // reading the files directly from the local git checkout.
         let resourceFiles = downloadResult.files;
         if (resourceFiles.length === 0) {
-          const gitType = sub.type as 'rule' | 'mcp';
-          const gitFiles = await multiSourceGitManager.readResourceFiles(sub.name, gitType as any);
+          const gitType = sub.type as 'command' | 'skill' | 'rule' | 'mcp';
+          const gitFiles = await multiSourceGitManager.readResourceFiles(sub.name, gitType);
           if (gitFiles.length > 0) {
             resourceFiles = gitFiles;
             logToolStep('sync_resources', 'Loaded resource files from local git checkout', {
@@ -305,11 +309,16 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
         // ── MCP resource ──────────────────────────────────────────────────────
         // Read mcp-config.json to determine Format A (local executable, has
         // "command" field) vs Format B (remote URL map, no "command" field).
+        //
+        // IMPORTANT: all paths in LocalAction instructions must use the CLIENT-side
+        // helper (tilde-based) so they resolve correctly on the user's machine,
+        // not on this (possibly remote Linux) server.
         if (sub.type === 'mcp') {
           const mcpConfigFile = resourceFiles.find(
             (f) => path.basename(f.path) === 'mcp-config.json',
           );
-          const mcpJsonPath = path.join(getCursorRootDir(), 'mcp.json');
+          // ~/.cursor/mcp.json on the user's machine
+          const mcpJsonPath = `${getCursorRootDirForClient()}/mcp.json`;
 
           if (mcpConfigFile) {
             let cfg: Record<string, unknown> = {};
@@ -319,19 +328,19 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             if (typeof cfg['command'] === 'string') {
               // ── Format A: local executable ──────────────────────────────────
               // Queue write_file for each resource file + merge_mcp_json for entry.
-              const installDir = path.join(getCursorTypeDir('mcp'), sub.name);
+              const installDir = `${getCursorTypeDirForClient('mcp')}/${sub.name}`;
               for (const file of resourceFiles) {
                 const normalised = path.normalize(file.path);
                 if (normalised.startsWith('..')) continue;
-                localActions.push({ action: 'write_file', path: path.join(installDir, normalised), content: file.content });
+                localActions.push({ action: 'write_file', path: `${installDir}/${normalised}`, content: file.content });
               }
               const env = (cfg['env'] ?? {}) as Record<string, string>;
               const missingEnv = Object.entries(env).filter(([, v]) => v === '').map(([k]) => k);
-              // Resolve relative args to the install directory.
+              // Resolve relative args to the install directory (client-side path).
               const looksLikePath = (a: string) =>
-                a.startsWith('./') || a.startsWith('../') || a.includes(path.sep) || /\.\w+$/.test(a);
+                a.startsWith('./') || a.startsWith('../') || a.includes('/') || /\.\w+$/.test(a);
               const args = ((cfg['args'] ?? []) as string[]).map((a) =>
-                path.isAbsolute(a) || !looksLikePath(a) ? a : path.join(installDir, a),
+                path.isAbsolute(a) || !looksLikePath(a) ? a : `${installDir}/${a.replace(/^\.\//, '')}`,
               );
               localActions.push({
                 action: 'merge_mcp_json',
@@ -368,11 +377,11 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             }
           } else {
             // No mcp-config.json: heuristic fallback — find entry point file.
-            const installDir = path.join(getCursorTypeDir('mcp'), sub.name);
+            const installDir = `${getCursorTypeDirForClient('mcp')}/${sub.name}`;
             for (const file of resourceFiles) {
               const normalised = path.normalize(file.path);
               if (normalised.startsWith('..')) continue;
-              localActions.push({ action: 'write_file', path: path.join(installDir, normalised), content: file.content });
+              localActions.push({ action: 'write_file', path: `${installDir}/${normalised}`, content: file.content });
             }
             const jsEntry = resourceFiles.find((f) => f.path.endsWith('.js'));
             const pyEntry = resourceFiles.find((f) => f.path.endsWith('.py'));
@@ -380,9 +389,9 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             const cmd = jsEntry ? 'node' : 'python3';
             localActions.push({
               action: 'merge_mcp_json',
-              mcp_json_path: path.join(getCursorRootDir(), 'mcp.json'),
+              mcp_json_path: mcpJsonPath,
               server_name: sub.name,
-              entry: { command: cmd, args: [path.join(installDir, entryFile?.path ?? '')] },
+              entry: { command: cmd, args: [`${installDir}/${entryFile?.path ?? ''}`] },
             });
             logToolStep('sync_resources', 'MCP heuristic fallback: write_file + merge_mcp_json queued', { resourceId: sub.id });
           }
@@ -394,8 +403,9 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
 
         // ── Rule resource ─────────────────────────────────────────────────────
         // Return write_file actions; the AI writes the files locally.
+        // Use client-side path so the path resolves on the user's machine.
         if (sub.type === 'rule') {
-          const typeDir = getCursorTypeDir(sub.type);
+          const typeDir = getCursorTypeDirForClient(sub.type);
 
           for (const file of resourceFiles) {
             const normalised = path.normalize(file.path);
@@ -405,7 +415,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             }
             localActions.push({
               action: 'write_file',
-              path: path.join(typeDir, normalised),
+              path: `${typeDir}/${normalised}`,
               content: file.content,
             });
           }

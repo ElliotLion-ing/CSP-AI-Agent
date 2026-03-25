@@ -29,6 +29,11 @@ export const CURSOR_TYPE_DIRS: Record<string, string> = {
  *
  * macOS / Linux : ~/.cursor
  * Windows       : %APPDATA%\Cursor\User
+ *
+ * NOTE: Only use this when running code on the USER's local machine.
+ * When generating paths for LocalAction instructions (which are executed by the
+ * AI on the user's machine, not on this server), use getCursorRootDirForClient()
+ * instead to avoid returning the server's home directory.
  */
 export function getCursorRootDir(): string {
   if (process.platform === 'win32') {
@@ -38,6 +43,40 @@ export function getCursorRootDir(): string {
   }
   // macOS and Linux both use ~/.cursor
   return path.join(os.homedir(), '.cursor');
+}
+
+/**
+ * Returns a platform-neutral Cursor root path for use in LocalAction instructions.
+ *
+ * LocalAction paths are sent to the AI Agent running on the USER's local machine,
+ * not executed on this (possibly remote) server.  Using os.homedir() here would
+ * produce the server's home directory (e.g. /root/.cursor on a Linux server),
+ * which is wrong when the user is on macOS or Windows.
+ *
+ * We return a tilde-prefixed path ("~/.cursor") which the AI / shell on the
+ * user's machine will expand to the correct home directory automatically.
+ * For Windows we still return the APPDATA-relative form as a hint, but note
+ * that the AI is expected to expand %APPDATA% on the client side.
+ */
+export function getCursorRootDirForClient(): string {
+  // Return a portable ~-based path; the AI on the user's machine expands it.
+  return '~/.cursor';
+}
+
+/**
+ * Returns the Cursor subdirectory for a given resource type, using a
+ * client-side portable path (tilde-based).  Use this when building paths
+ * that will be included in LocalAction instructions.
+ */
+export function getCursorTypeDirForClient(resourceType: string): string {
+  const subdir = CURSOR_TYPE_DIRS[resourceType.toLowerCase()];
+  if (!subdir) {
+    throw new Error(
+      `Unknown resource type "${resourceType}". ` +
+      `Supported types: ${Object.keys(CURSOR_TYPE_DIRS).join(', ')}`
+    );
+  }
+  return `${getCursorRootDirForClient()}/${subdir}`;
 }
 
 /**

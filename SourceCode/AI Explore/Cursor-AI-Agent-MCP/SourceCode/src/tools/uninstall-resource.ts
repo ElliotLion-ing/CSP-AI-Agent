@@ -6,12 +6,9 @@
  * For directory-based resources (skill, mcp) the entire install directory is removed.
  */
 
-import * as fs from 'fs/promises';
-import * as path from 'path';
 import { logger, logToolCall } from '../utils/logger';
-import { filesystemManager } from '../filesystem/manager';
 import { apiClient } from '../api/client';
-import { getCursorTypeDir, getCursorRootDir } from '../utils/cursor-paths.js';
+import { getCursorTypeDirForClient, getCursorRootDirForClient } from '../utils/cursor-paths.js';
 import { MCPServerError, createValidationError } from '../types/errors';
 import type { UninstallResourceParams, UninstallResourceResult, LocalAction, ToolResult } from '../types/tools';
 import { promptManager } from '../prompts/index.js';
@@ -93,47 +90,29 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
     logger.debug({ pattern }, 'Building local uninstall actions for Rule/MCP resource...');
 
     const localActions: LocalAction[] = [];
-    const mcpJsonPath = path.join(getCursorRootDir(), 'mcp.json');
+    // Use client-side tilde-based paths; the MCP server may be running remotely
+    // and its os.homedir() would resolve to the server's home, not the user's.
+    const mcpJsonPath = `${getCursorRootDirForClient()}/mcp.json`;
 
-    // Rule: delete matching .md/.mdc files from ~/.cursor/rules/
-    try {
-      const rulesDir = getCursorTypeDir('rule');
-      const ruleFiles = await filesystemManager.listFiles(rulesDir, /\.(md|mdc)$/);
-      for (const relName of ruleFiles) {
-        const baseName = path.basename(relName).replace(/\.(md|mdc)$/, '');
-        if (baseName === pattern || baseName.includes(pattern) || relName.includes(pattern)) {
-          const absPath = path.join(rulesDir, relName);
-          localActions.push({ action: 'delete_file', path: absPath });
-          removedResources.push({ id: baseName, name: baseName, path: absPath });
-        }
-      }
-    } catch { /* rules dir may not exist */ }
-
-    // MCP: delete install directory + remove mcp.json entry
-    try {
-      const mcpDir = getCursorTypeDir('mcp');
-      const entries = await fs.readdir(mcpDir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        if (entry.name === pattern || entry.name.includes(pattern)) {
-          const dirPath = path.join(mcpDir, entry.name);
-          localActions.push({ action: 'delete_file', path: dirPath, recursive: true });
-          localActions.push({ action: 'remove_mcp_json_entry', mcp_json_path: mcpJsonPath, server_name: entry.name });
-          removedResources.push({ id: entry.name, name: entry.name, path: dirPath });
-        }
-      }
-    } catch { /* mcp-servers dir may not exist */ }
-
-    // Also check Remote-URL MCPs whose entry is only in mcp.json (no local dir).
-    // The pattern might match a server name in mcp.json directly.
-    if (localActions.filter(a => a.action === 'remove_mcp_json_entry').length === 0) {
-      // Add a conditional remove action — the AI will check if the key exists.
-      localActions.push({
-        action: 'remove_mcp_json_entry',
-        mcp_json_path: mcpJsonPath,
-        server_name: pattern,
-      });
+    // Rule: queue delete for ~/.cursor/rules/<pattern>.mdc and .md variants.
+    // We cannot scan the server's filesystem for the user's rules, so we emit
+    // delete actions for the two common extensions and let the AI skip missing files.
+    const rulesDir = getCursorTypeDirForClient('rule');
+    for (const ext of ['.mdc', '.md']) {
+      const filePath = `${rulesDir}/${pattern}${ext}`;
+      localActions.push({ action: 'delete_file', path: filePath });
+      removedResources.push({ id: pattern, name: pattern, path: filePath });
     }
+
+    // MCP: queue delete of install directory (Format A) + remove mcp.json entry.
+    // For Format B (remote URL only) there is no local directory, but we still
+    // need to remove the mcp.json entry — the AI will skip the delete if the
+    // directory does not exist.
+    const mcpDir = getCursorTypeDirForClient('mcp');
+    const mcpInstallDir = `${mcpDir}/${pattern}`;
+    localActions.push({ action: 'delete_file', path: mcpInstallDir, recursive: true });
+    localActions.push({ action: 'remove_mcp_json_entry', mcp_json_path: mcpJsonPath, server_name: pattern });
+    removedResources.push({ id: pattern, name: pattern, path: mcpInstallDir });
 
     if (removedResources.length === 0 && localActions.length === 0) {
       throw createValidationError(

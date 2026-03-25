@@ -309,13 +309,23 @@ class MultiSourceGitManager {
    */
   async readResourceFiles(
     resourceName: string,
-    resourceType: 'command' | 'skill',
+    resourceType: 'command' | 'skill' | 'rule' | 'mcp',
   ): Promise<Array<{ path: string; content: string }>> {
     const sources = await this.getEnabledSources();
     // Sort by priority descending so higher-priority sources win.
     sources.sort((a, b) => b.priority - a.priority);
 
-    const typeDir = resourceType === 'command' ? 'commands' : 'skills';
+    // Map singular type names to the plural directory keys used in config.
+    const typeToDirKey: Record<string, keyof SourceConfig['resources']> = {
+      command: 'commands',
+      commands: 'commands',
+      skill: 'skills',
+      skills: 'skills',
+      rule: 'rules',
+      rules: 'rules',
+      mcp: 'mcp',
+    };
+    const typeDir = typeToDirKey[resourceType] ?? 'skills';
 
     for (const source of sources) {
       const sourcePath = path.join(this.baseDir, source.path);
