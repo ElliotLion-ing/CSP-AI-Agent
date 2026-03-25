@@ -30,6 +30,7 @@ import type {
  */
 export class ResourceLoader {
   private config: AIResourcesConfig | null = null;
+  private configFilePath: string | null = null;
   private resourceIndex: Map<string, ResourceMetadata> = new Map();
   private conflicts: ResourceConflict[] = [];
   private stats: LoaderStats | null = null;
@@ -47,8 +48,21 @@ export class ResourceLoader {
     const startTime = Date.now();
     
     try {
-      // Default config path
-      const defaultPath = path.resolve(process.cwd(), 'AI-Resources/ai-resources-config.json');
+      // Resolve the AI-Resources base directory using the same probing strategy
+      // as multi-source-manager so both modules agree on the path regardless of
+      // whether the server runs locally (cwd = SourceCode/) or in Docker (cwd = /app).
+      let defaultPath = path.resolve(process.cwd(), 'AI-Resources/ai-resources-config.json');
+      if (!configPath) {
+        const candidates = [
+          path.resolve(process.env['AI_RESOURCES_PATH'] ?? '', 'ai-resources-config.json'),
+          path.resolve(process.cwd(), 'AI-Resources/ai-resources-config.json'),
+          path.resolve(process.cwd(), '../AI-Resources/ai-resources-config.json'),
+          path.resolve(__dirname, '../../AI-Resources/ai-resources-config.json'),
+        ].filter(Boolean);
+        for (const c of candidates) {
+          try { await fs.access(c); defaultPath = c; break; } catch { /* try next */ }
+        }
+      }
       const finalPath = configPath || defaultPath;
 
       logger.debug({ configPath: finalPath }, 'Loading AI Resources configuration...');
@@ -70,6 +84,7 @@ export class ResourceLoader {
       this.validateConfig(parsedConfig);
 
       this.config = parsedConfig;
+      this.configFilePath = finalPath;
       this.cacheEnabled = parsedConfig.cache?.enabled ?? true;
       this.cacheTTL = (parsedConfig.cache?.ttl ?? 300) * 1000; // Convert to ms
 
@@ -285,7 +300,13 @@ export class ResourceLoader {
   ): Promise<void> {
     logger.debug({ source: source.name, path: source.path }, 'Scanning source...');
 
-    const baseDir = path.resolve(process.cwd(), 'AI-Resources', source.path);
+    // Derive the AI-Resources base from the config file path stored on the instance,
+    // so the source subdirectory resolves correctly in Docker (cwd = /app) and local
+    // dev (cwd = SourceCode/) without needing a separate env var.
+    const aiResourcesBase = this.configFilePath
+      ? path.dirname(this.configFilePath)
+      : path.resolve(process.cwd(), 'AI-Resources');
+    const baseDir = path.resolve(aiResourcesBase, source.path);
 
     // Check if source directory exists
     try {
@@ -336,14 +357,26 @@ export class ResourceLoader {
           const resourceName = path.basename(entry.name, path.extname(entry.name));
           await this.indexResource(source, type, resourceName, fullPath, stats);
         } else if (entry.isDirectory()) {
-          // Handle directory resources (skills, mcp)
-          const skillFile = path.join(fullPath, 'SKILL.md');
-          try {
-            await fs.access(skillFile);
-            await this.indexResource(source, type, entry.name, skillFile, stats);
-          } catch {
-            // Not a skill directory, skip
-            logger.debug({ dir: fullPath }, 'Directory does not contain SKILL.md, skipping');
+          // Handle directory resources:
+          //   skill → must contain SKILL.md
+          //   mcp   → must contain mcp-config.json
+          //   others → directory layout is not expected; skip
+          if (type === 'skills') {
+            const skillFile = path.join(fullPath, 'SKILL.md');
+            try {
+              await fs.access(skillFile);
+              await this.indexResource(source, type, entry.name, skillFile, stats);
+            } catch {
+              logger.debug({ dir: fullPath }, 'Directory does not contain SKILL.md, skipping');
+            }
+          } else if (type === 'mcp') {
+            const mcpConfigFile = path.join(fullPath, 'mcp-config.json');
+            try {
+              await fs.access(mcpConfigFile);
+              await this.indexResource(source, type, entry.name, mcpConfigFile, stats);
+            } catch {
+              logger.debug({ dir: fullPath }, 'Directory does not contain mcp-config.json, skipping');
+            }
           }
         }
       }

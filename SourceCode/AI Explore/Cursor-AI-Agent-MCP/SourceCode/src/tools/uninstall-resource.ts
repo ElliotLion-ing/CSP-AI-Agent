@@ -87,32 +87,38 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
     // The MCP server may be running remotely; we must NOT touch the server's
     // own filesystem.  Instead we return delete/remove instructions so the AI
     // Agent performs them on the user's LOCAL machine.
-    logger.debug({ pattern }, 'Building local uninstall actions for Rule/MCP resource...');
+    logger.debug({ pattern, resourceType: typedParams.resource_type }, 'Building local uninstall actions for Rule/MCP resource...');
 
     const localActions: LocalAction[] = [];
     // Use client-side tilde-based paths; the MCP server may be running remotely
     // and its os.homedir() would resolve to the server's home, not the user's.
     const mcpJsonPath = `${getCursorRootDirForClient()}/mcp.json`;
 
-    // Rule: queue delete for ~/.cursor/rules/<pattern>.mdc and .md variants.
-    // We cannot scan the server's filesystem for the user's rules, so we emit
-    // delete actions for the two common extensions and let the AI skip missing files.
-    const rulesDir = getCursorTypeDirForClient('rule');
-    for (const ext of ['.mdc', '.md']) {
-      const filePath = `${rulesDir}/${pattern}${ext}`;
-      localActions.push({ action: 'delete_file', path: filePath });
-      removedResources.push({ id: pattern, name: pattern, path: filePath });
+    // When resource_type is provided, only emit the relevant actions.
+    // When unknown, emit both (AI skips missing files gracefully).
+    const knownType = typedParams.resource_type;
+    const isRule = !knownType || knownType === 'rule';
+    const isMcp  = !knownType || knownType === 'mcp';
+
+    if (isRule) {
+      // Rule: delete ~/.cursor/rules/<pattern>.mdc and .md variants.
+      const rulesDir = getCursorTypeDirForClient('rule');
+      for (const ext of ['.mdc', '.md']) {
+        const filePath = `${rulesDir}/${pattern}${ext}`;
+        localActions.push({ action: 'delete_file', path: filePath });
+        removedResources.push({ id: pattern, name: pattern, path: filePath });
+      }
     }
 
-    // MCP: queue delete of install directory (Format A) + remove mcp.json entry.
-    // For Format B (remote URL only) there is no local directory, but we still
-    // need to remove the mcp.json entry — the AI will skip the delete if the
-    // directory does not exist.
-    const mcpDir = getCursorTypeDirForClient('mcp');
-    const mcpInstallDir = `${mcpDir}/${pattern}`;
-    localActions.push({ action: 'delete_file', path: mcpInstallDir, recursive: true });
-    localActions.push({ action: 'remove_mcp_json_entry', mcp_json_path: mcpJsonPath, server_name: pattern });
-    removedResources.push({ id: pattern, name: pattern, path: mcpInstallDir });
+    if (isMcp) {
+      // MCP: delete install directory (Format A — may not exist for remote-URL MCPs)
+      // and remove the mcpServers entry from mcp.json.
+      const mcpDir = getCursorTypeDirForClient('mcp');
+      const mcpInstallDir = `${mcpDir}/${pattern}`;
+      localActions.push({ action: 'delete_file', path: mcpInstallDir, recursive: true });
+      localActions.push({ action: 'remove_mcp_json_entry', mcp_json_path: mcpJsonPath, server_name: pattern });
+      removedResources.push({ id: pattern, name: pattern, path: mcpInstallDir });
+    }
 
     if (removedResources.length === 0 && localActions.length === 0) {
       throw createValidationError(

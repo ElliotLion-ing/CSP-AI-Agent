@@ -153,21 +153,40 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
         // getCursorResourcePath throws for unrecognised types, caught below.
         const destPath = getCursorResourcePath(sub.type, sub.name);
 
-        // In check mode: just report whether the resource already exists locally.
+        // In check mode: report whether the resource is already available.
+        // Command/Skill: check the in-memory Prompt registry (no local files).
+        // Rule/MCP: check whether the local file / mcp.json entry exists.
         if (mode === 'check') {
-          try {
-            await fs.access(destPath);
-            tally.cached++;
-            details.push({ id: sub.id, name: sub.name, action: 'cached', version: resourceVersion });
-            logToolStep('sync_resources', 'Resource already present (check mode)', {
-              resourceId: sub.id, destPath,
-            });
-          } catch {
-            tally.failed++;
-            details.push({ id: sub.id, name: sub.name, action: 'failed', version: resourceVersion });
-            logToolStep('sync_resources', 'Resource missing (check mode)', {
-              resourceId: sub.id, destPath,
-            });
+          if (sub.type === 'command' || sub.type === 'skill') {
+            const meta = {
+              resource_id: sub.id,
+              resource_type: sub.type as 'command' | 'skill',
+              resource_name: sub.name,
+              team: (sub as any).team ?? 'general',
+            };
+            const isRegistered = promptManager.has(promptManager.buildPromptName(meta), userToken ?? '');
+            if (isRegistered) {
+              tally.cached++;
+              details.push({ id: sub.id, name: sub.name, action: 'cached', version: resourceVersion });
+            } else {
+              tally.failed++;
+              details.push({ id: sub.id, name: sub.name, action: 'failed', version: resourceVersion });
+            }
+          } else {
+            try {
+              await fs.access(destPath);
+              tally.cached++;
+              details.push({ id: sub.id, name: sub.name, action: 'cached', version: resourceVersion });
+              logToolStep('sync_resources', 'Resource already present (check mode)', {
+                resourceId: sub.id, destPath,
+              });
+            } catch {
+              tally.failed++;
+              details.push({ id: sub.id, name: sub.name, action: 'failed', version: resourceVersion });
+              logToolStep('sync_resources', 'Resource missing (check mode)', {
+                resourceId: sub.id, destPath,
+              });
+            }
           }
           continue;
         }

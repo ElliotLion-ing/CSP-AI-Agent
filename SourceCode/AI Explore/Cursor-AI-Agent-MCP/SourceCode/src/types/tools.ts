@@ -242,6 +242,8 @@ export interface UploadResourceResult {
 export interface UninstallResourceParams {
   resource_id_or_name: string;
   remove_from_account?: boolean;
+  /** When known, the resource type — narrows which local_actions are emitted. */
+  resource_type?: 'command' | 'skill' | 'rule' | 'mcp';
   /** CSP API token from the user's mcp.json env configuration. */
   user_token?: string;
 }

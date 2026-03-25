@@ -103,6 +103,18 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
 
         logger.debug({ resourceIds: typedParams.resource_ids }, 'Unsubscribing from resources...');
 
+        // Build a resource_id → type map from the current subscription list so
+        // uninstall actions can be scoped precisely to rule vs mcp resources.
+        let idToType: Map<string, string> = new Map();
+        try {
+          const currentSubs = await apiClient.getSubscriptions({}, typedParams.user_token);
+          for (const s of currentSubs.subscriptions) {
+            idToType.set(s.id, s.type);
+          }
+        } catch (e) {
+          logger.warn({ error: (e as Error).message }, 'Could not fetch subscriptions for type resolution — uninstall will emit both rule+mcp actions as fallback');
+        }
+
         // Cancel server-side subscription
         await apiClient.unsubscribe(typedParams.resource_ids, typedParams.user_token);
         logger.info({ count: typedParams.resource_ids.length }, 'Server-side subscriptions removed');
@@ -112,17 +124,22 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         const uninstallResults: Array<{ id: string; removed: boolean; detail: string }> = [];
         for (const resourceId of typedParams.resource_ids) {
           // Determine if this is a Command or Skill by checking the prompt registry.
-          // Resource IDs follow the pattern: cmd-<source>-<name> or skill-<source>-<name>.
-          const isCommand = resourceId.startsWith('cmd-');
-          const isSkill   = resourceId.startsWith('skill-');
-          if (isCommand || isSkill) {
-            const resourceType = isCommand ? 'command' : 'skill';
-            // Extract resource name from the ID (cmd-<team>-<name> or skill-<team>-<name>).
-            const parts = resourceId.split('-');
-            const resourceName = parts.slice(2).join('-') || resourceId;
-            promptManager.unregisterPrompt(resourceId, resourceType as 'command' | 'skill', resourceName, typedParams.user_token ?? '');
+          // API resource IDs are UUIDs (e.g. "0ccd800f..."), NOT prefixed with "cmd-"/"skill-".
+          // Check whether any registered prompt for this user matches the resource_id.
+          const matchedPromptName = promptManager.promptNames(typedParams.user_token ?? '').find(
+            (name) => {
+              // Prompt names are "<type>/<resource_name>"; check by looking up the registered meta.
+              const registered = promptManager.getByPromptName(name, typedParams.user_token ?? '');
+              return registered?.meta?.resource_id === resourceId;
+            },
+          );
+          if (matchedPromptName) {
+            const parts = matchedPromptName.split('/');
+            const resourceType = (parts[0] ?? 'command') as 'command' | 'skill';
+            const resourceName = parts.slice(1).join('/') || matchedPromptName;
+            promptManager.unregisterPrompt(resourceId, resourceType, resourceName, typedParams.user_token ?? '');
             uninstallResults.push({ id: resourceId, removed: true, detail: `Unregistered MCP Prompt for "${resourceName}"` });
-            logger.info({ resourceId, resourceType }, 'MCP Prompt unregistered on unsubscribe');
+            logger.info({ resourceId, resourceType, matchedPromptName }, 'MCP Prompt unregistered on unsubscribe');
             continue;
           }
           // Use the last segment of the resource ID as the search pattern
@@ -139,11 +156,13 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             namePart,
           ]));
 
+          const resolvedType = idToType.get(resourceId) as 'rule' | 'mcp' | undefined;
           let uninstalled = false;
           for (const pattern of patternsToTry) {
             const uninstallResult = await uninstallResource({
               resource_id_or_name: pattern,
               remove_from_account: false, // already unsubscribed above
+              ...(resolvedType ? { resource_type: resolvedType } : {}),
             });
             if (uninstallResult.success && uninstallResult.data && uninstallResult.data.removed_resources.length > 0) {
               uninstallResults.push({ id: resourceId, removed: true, detail: `Removed local files for "${pattern}"` });
