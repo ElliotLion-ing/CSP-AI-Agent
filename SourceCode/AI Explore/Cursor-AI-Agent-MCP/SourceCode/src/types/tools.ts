@@ -4,6 +4,64 @@
 
 import type { MCPToolSchema } from './mcp';
 
+// ── LocalAction ────────────────────────────────────────────────────────────
+//
+// When the MCP server is deployed remotely it cannot write to the user's local
+// filesystem.  Instead it returns a list of LocalAction instructions that the
+// AI Agent (running inside the user's local Cursor) must execute.
+//
+// Action types:
+//   write_file          – create or overwrite a local file
+//   delete_file         – delete a local file or directory
+//   merge_mcp_json      – merge an MCP server entry into ~/.cursor/mcp.json
+//   remove_mcp_json_entry – remove an MCP server entry from ~/.cursor/mcp.json
+
+export interface WriteFileAction {
+  action: 'write_file';
+  /** Absolute path on the user's local machine (may start with ~). */
+  path: string;
+  /** UTF-8 file content to write. */
+  content: string;
+}
+
+export interface DeleteFileAction {
+  action: 'delete_file';
+  /** Absolute path on the user's local machine (may start with ~). */
+  path: string;
+  /** When true, recursively delete a directory. */
+  recursive?: boolean;
+}
+
+export interface MergeMcpJsonAction {
+  action: 'merge_mcp_json';
+  /** Absolute path to the user's mcp.json file. */
+  mcp_json_path: string;
+  /** Key under mcpServers to add or update. */
+  server_name: string;
+  /** The MCP server entry object to merge in. */
+  entry: Record<string, unknown>;
+  /** env keys that are currently empty and must be filled by the user. */
+  missing_env?: string[];
+  /** Human-readable hint when manual env configuration is required. */
+  setup_hint?: string;
+  /** Path to a local setup/readme doc if one exists in the install dir. */
+  setup_doc?: string;
+}
+
+export interface RemoveMcpJsonEntryAction {
+  action: 'remove_mcp_json_entry';
+  /** Absolute path to the user's mcp.json file. */
+  mcp_json_path: string;
+  /** Key under mcpServers to remove. */
+  server_name: string;
+}
+
+export type LocalAction =
+  | WriteFileAction
+  | DeleteFileAction
+  | MergeMcpJsonAction
+  | RemoveMcpJsonEntryAction;
+
 // Tool Handler Function Type (generic, accepts any params and returns any result)
 export type ToolHandler = (params: unknown) => Promise<ToolResult>;
 
@@ -78,8 +136,18 @@ export interface SyncResourcesResult {
   /**
    * MCP servers that were installed/updated but require manual configuration
    * before they can be used. Present only when at least one server needs setup.
+   * @deprecated use local_actions_required MergeMcpJsonAction.missing_env instead
    */
   pending_setup?: McpSetupItem[];
+  /**
+   * Ordered list of file-system and mcp.json operations the AI Agent must
+   * execute on the user's LOCAL machine after receiving this response.
+   * Present only when at least one Rule or MCP resource was synced.
+   *
+   * The AI MUST execute every action in order before reporting success to the
+   * user.  See LocalAction type variants for details.
+   */
+  local_actions_required?: LocalAction[];
 }
 
 // manage_subscription
@@ -187,4 +255,10 @@ export interface UninstallResourceResult {
   }>;
   subscription_removed: boolean;
   message: string;
+  /**
+   * Ordered list of file-system and mcp.json operations the AI Agent must
+   * execute on the user's LOCAL machine after receiving this response.
+   * Present only for Rule and local-executable MCP resources.
+   */
+  local_actions_required?: LocalAction[];
 }
