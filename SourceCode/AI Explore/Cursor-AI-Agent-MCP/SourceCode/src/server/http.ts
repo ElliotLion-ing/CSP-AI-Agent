@@ -152,9 +152,11 @@ export class HTTPServer {
   private createMcpServer(userId?: string, email?: string, groups?: string[], userToken?: string): Server {
     const server = new Server(
       { name: 'csp-ai-agent-mcp', version: '0.2.0' },
-      // Declare resources capability so Cursor does not emit "Method not found"
-      // when it probes prompt:// URIs via the resources/read protocol.
-      { capabilities: { tools: {}, prompts: {}, resources: {} } }
+      // Declare resources + logging capabilities.
+      // - resources: prevents "Method not found" when Cursor probes prompt:// URIs.
+      // - logging: allows server.sendLoggingMessage() so we can push local-action
+      //   instructions to the AI after the background auto-sync completes.
+      { capabilities: { tools: {}, prompts: {}, resources: {}, logging: {} } }
     );
 
     // Install Prompt list/get handlers synchronously on this Server instance.
@@ -186,12 +188,28 @@ export class HTTPServer {
       // Flush any pending telemetry immediately on (re)connect so events from
       // before a disconnect are not held until the next 10-second tick.
       telemetry.flushOnReconnect();
-      syncResources({ mode: 'incremental', scope: 'global', user_token: userToken }).then((result) => {
+      syncResources({ mode: 'incremental', scope: 'global', user_token: userToken }).then(async (result) => {
         if (result.success) {
           logger.info(
             { userId, synced: result.data?.summary?.synced, cached: result.data?.summary?.cached },
             'Auto sync_resources on connect completed'
           );
+          // If the sync result includes local_actions_required (e.g. Rule files or
+          // MCP entries that must be written on the user's local machine), push a
+          // structured logging message so the Cursor AI Agent can see and execute them.
+          const actions = result.data?.local_actions_required;
+          if (actions && actions.length > 0) {
+            const msg =
+              `[CSP AI Agent] Auto-sync completed with ${actions.length} local action(s) pending.\n` +
+              `Please execute ALL of the following actions on the user's local machine:\n\n` +
+              JSON.stringify(actions, null, 2);
+            try {
+              await server.sendLoggingMessage({ level: 'info', data: msg });
+              logger.info({ userId, actionCount: actions.length }, 'Pushed local_actions_required to AI via logging notification');
+            } catch (notifyErr) {
+              logger.warn({ userId, err: notifyErr }, 'Failed to push local_actions notification to AI');
+            }
+          }
         } else {
           logger.warn({ userId, error: result.error }, 'Auto sync_resources on connect failed');
         }
