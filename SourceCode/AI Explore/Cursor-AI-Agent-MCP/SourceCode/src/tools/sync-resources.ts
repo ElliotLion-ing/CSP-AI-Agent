@@ -18,6 +18,7 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { createHash } from 'crypto';
 import { logger, logToolCall, logToolStep, logToolResult } from '../utils/logger';
 import { apiClient } from '../api/client';
 import { multiSourceGitManager } from '../git/multi-source-manager';
@@ -35,6 +36,39 @@ import type {
 } from '../types/tools';
 import { telemetry } from '../telemetry/index.js';
 import { promptManager } from '../prompts/index.js';
+
+/**
+ * Server-side in-memory download cache.
+ *
+ * Purpose: avoid redundant API download calls for resources whose content has
+ * not changed between syncs IN THE SAME SERVER SESSION.
+ *
+ * IMPORTANT — this cache ONLY skips the network download; it NEVER skips
+ * generating LocalAction instructions.  Whether the user's local files are
+ * already up-to-date is determined client-side via the `content_hash` field
+ * on write_file actions and `skip_if_exists` on merge_mcp_json actions.
+ * This ensures a manual sync always re-delivers actions so the user can
+ * recover deleted local files, even when the resource content is unchanged.
+ *
+ * Key format: `${userToken}::${resourceId}`
+ * Value: the last downloadResource() response (hash + files).
+ *
+ * The cache is process-scoped and cleared on server restart.
+ */
+interface CachedDownload {
+  hash: string;
+  files: Array<{ path: string; content: string }>;
+}
+const downloadCache = new Map<string, CachedDownload>();
+
+function syncCacheKey(userToken: string, resourceId: string): string {
+  return `${userToken}::${resourceId}`;
+}
+
+/** Compute SHA-256 hex digest of a UTF-8 string. */
+function sha256(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex');
+}
 
 /**
  * Extract the `description` field from YAML frontmatter in a Markdown file.
@@ -299,18 +333,40 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
           continue;
         }
 
-        // Download all files for this resource from the CSP server.
-        logToolStep('sync_resources', 'Downloading resource', {
-          resourceId: sub.id,
-          resourceType: sub.type,
-        });
-        const tDl = Date.now();
-        const downloadResult = await apiClient.downloadResource(sub.id, userToken);
-        logToolStep('sync_resources', 'Download complete', {
-          resourceId: sub.id,
-          fileCount: downloadResult.files.length,
-          duration: Date.now() - tDl,
-        });
+        // ── Download (with server-session cache) ─────────────────────────────
+        // The download cache avoids redundant API calls when the same resource
+        // is synced multiple times within one server session without any content
+        // change.  It ONLY caches the network response; LocalAction generation
+        // always proceeds so that users can recover deleted local files by
+        // re-running sync — even when the resource content is unchanged.
+        const cacheKey = syncCacheKey(userToken ?? '', sub.id);
+        let downloadResult: { hash: string; files: Array<{ path: string; content: string }> };
+
+        const cached = downloadCache.get(cacheKey);
+        if (mode === 'incremental' && cached) {
+          // Reuse the previously downloaded content without hitting the API.
+          // full mode always bypasses this branch to guarantee a fresh download.
+          downloadResult = cached;
+          logToolStep('sync_resources', 'Using cached download (no API call)', {
+            resourceId: sub.id,
+            cachedHash: cached.hash,
+          });
+        } else {
+          logToolStep('sync_resources', 'Downloading resource', {
+            resourceId: sub.id,
+            resourceType: sub.type,
+          });
+          const tDl = Date.now();
+          const apiResult = await apiClient.downloadResource(sub.id, userToken);
+          logToolStep('sync_resources', 'Download complete', {
+            resourceId: sub.id,
+            fileCount: apiResult.files.length,
+            duration: Date.now() - tDl,
+          });
+          downloadResult = { hash: apiResult.hash, files: apiResult.files };
+          // Refresh cache with the latest download.
+          downloadCache.set(cacheKey, downloadResult);
+        }
 
         // When the API returns no files (expected when the MCP server is deployed
         // remotely and content lives in the server-side git repo), fall back to
@@ -393,7 +449,14 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                 const normalised = path.normalize(file.path);
                 if (normalised.startsWith('..')) continue;
                 const fileDest = `${installDir}/${normalised}`;
-                localActions.push({ action: 'write_file', path: fileDest, content: file.content });
+                // Carry content_hash so the AI can skip the write when the
+                // local file already has identical content.
+                localActions.push({
+                  action: 'write_file',
+                  path: fileDest,
+                  content: file.content,
+                  content_hash: sha256(file.content),
+                });
                 writeActions.push(fileDest);
               }
               const env = (cfg['env'] ?? {}) as Record<string, string>;
@@ -409,6 +472,9 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                 mcp_json_path: mcpJsonPath,
                 server_name: serverName,
                 entry: { ...cfg, args },
+                // skip_if_exists: preserve user-edited env values; the entry
+                // is already configured if the key exists in mcp.json.
+                skip_if_exists: true,
                 ...(missingEnv.length > 0 ? {
                   missing_env: missingEnv,
                   setup_hint: `Fill in env vars in ${mcpJsonPath} under mcpServers["${sub.name}"]: ${missingEnv.join(', ')}.`,
@@ -440,6 +506,9 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                   mcp_json_path: mcpJsonPath,
                   server_name: serverName,
                   entry: e,
+                  // skip_if_exists: user may have customised env values; do
+                  // not overwrite an existing entry on every incremental sync.
+                  skip_if_exists: true,
                   ...(missingEnv.length > 0 ? {
                     missing_env: missingEnv,
                     setup_hint: `Fill in env vars in ${mcpJsonPath} under mcpServers["${serverName}"]: ${missingEnv.join(', ')}.`,
@@ -469,7 +538,12 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               const normalised = path.normalize(file.path);
               if (normalised.startsWith('..')) continue;
               const fileDest = `${installDir}/${normalised}`;
-              localActions.push({ action: 'write_file', path: fileDest, content: file.content });
+              localActions.push({
+                action: 'write_file',
+                path: fileDest,
+                content: file.content,
+                content_hash: sha256(file.content),
+              });
               writeActions.push(fileDest);
             }
             const jsEntry = resourceFiles.find((f) => f.path.endsWith('.js'));
@@ -482,6 +556,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               mcp_json_path: mcpJsonPath,
               server_name: sub.name,
               entry: { command: cmd, args: [entryPath] },
+              skip_if_exists: true,
             });
             logger.info(
               {
@@ -506,7 +581,8 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
 
         // ── Rule resource ─────────────────────────────────────────────────────
         // Return write_file actions; the AI writes the files locally.
-        // Use client-side path so the path resolves on the user's machine.
+        // Each action carries content_hash so the AI can skip the write when
+        // the local file already has identical content.
         if (sub.type === 'rule') {
           const typeDir = getCursorTypeDirForClient(sub.type);
           const writeActions: string[] = [];
@@ -522,6 +598,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               action: 'write_file',
               path: destPath,
               content: file.content,
+              content_hash: sha256(file.content),
             });
             writeActions.push(destPath);
           }
@@ -657,10 +734,17 @@ export const syncResourcesTool = {
     'Rule and MCP resources are returned as `local_actions_required` — an ordered list of ' +
     'write_file, merge_mcp_json, or other actions that the AI Agent MUST execute on the ' +
     'USER\'S LOCAL MACHINE after receiving the response. ' +
-    'Execute every action in the list before reporting success to the user. ' +
-    'For merge_mcp_json actions: read the existing ~/.cursor/mcp.json, smart-merge the ' +
-    'provided entry (preserve existing user env values), then write the file back. ' +
-    'For write_file actions: create any missing parent directories then write the file.',
+    'Execute every action in the list in order before reporting success to the user. ' +
+    'For write_file actions: ' +
+    '  (1) If the action has a `content_hash` field, read the existing file (if any), compute its SHA-256, ' +
+    '      and SKIP the write if the digests match — the file is already up-to-date. ' +
+    '  (2) Otherwise create any missing parent directories then write the file. ' +
+    'For merge_mcp_json actions: ' +
+    '  (1) If the action has `skip_if_exists: true` AND `mcpServers[server_name]` already exists ' +
+    '      in ~/.cursor/mcp.json, SKIP this action entirely — the server is already configured ' +
+    '      and any user-edited env values must not be overwritten. ' +
+    '  (2) Otherwise read the existing ~/.cursor/mcp.json, smart-merge the provided entry ' +
+    '      (preserve existing user env values), then write the file back.',
   inputSchema: {
     type: 'object' as const,
     properties: {

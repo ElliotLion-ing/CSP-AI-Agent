@@ -194,21 +194,16 @@ export class HTTPServer {
             { userId, synced: result.data?.summary?.synced, cached: result.data?.summary?.cached },
             'Auto sync_resources on connect completed'
           );
-          // If the sync result includes local_actions_required (e.g. Rule files or
-          // MCP entries that must be written on the user's local machine), push a
-          // structured logging message so the Cursor AI Agent can see and execute them.
+          // If the sync result includes local_actions_required (Rule files /
+          // MCP entries that must be written on the user's local machine),
+          // cache them in PromptManager.  They will be embedded directly into
+          // the csp-ai-agent-setup prompt content the next time the AI calls
+          // GetPrompt for that prompt, so the AI receives them without needing
+          // to call sync_resources again and without relying on sendLoggingMessage
+          // (which is unreliable — the connection may already be closed by then).
           const actions = result.data?.local_actions_required;
           if (actions && actions.length > 0) {
-            const msg =
-              `[CSP AI Agent] Auto-sync completed with ${actions.length} local action(s) pending.\n` +
-              `Please execute ALL of the following actions on the user's local machine:\n\n` +
-              JSON.stringify(actions, null, 2);
-            try {
-              await server.sendLoggingMessage({ level: 'info', data: msg });
-              logger.info({ userId, actionCount: actions.length }, 'Pushed local_actions_required to AI via logging notification');
-            } catch (notifyErr) {
-              logger.warn({ userId, err: notifyErr }, 'Failed to push local_actions notification to AI');
-            }
+            promptManager.storeSyncActions(userToken ?? '', actions);
           }
         } else {
           logger.warn({ userId, error: result.error }, 'Auto sync_resources on connect failed');
@@ -312,11 +307,33 @@ export class HTTPServer {
       // Build the absolute message URL for the SSE endpoint event.
       // Cursor (and other MCP clients) resolve the endpoint event data as a URL;
       // using a relative path causes some clients to misinterpret it as a redirect.
-      // We use the Host header when available so the URL matches what the client
-      // actually connected to (important behind proxies / ngrok / etc.).
+      //
+      // Priority order for determining the public base URL:
+      //   1. PUBLIC_URL env var — explicit override for reverse-proxy / Docker deployments
+      //      where the Host header reflects the internal address (e.g. 0.0.0.0:5080)
+      //      rather than the externally reachable hostname.
+      //      Set this to the full external origin, e.g. https://mcp.example.com
+      //   2. X-Forwarded-Host / X-Forwarded-Proto headers — set by well-configured proxies
+      //   3. Host header from the incoming request (may be the internal address behind nginx)
+      //   4. Fallback to HTTP_HOST:HTTP_PORT from config
       const basePath = config.http?.basePath ?? '';
-      const host = request.headers.host ?? `${config.http?.host ?? '127.0.0.1'}:${config.http?.port ?? 3000}`;
-      const messageUrl = `http://${host}${basePath}/message`;
+      let messageUrl: string;
+
+      const publicUrl = process.env['PUBLIC_URL'];
+      if (publicUrl) {
+        // Strip trailing slash, then append basePath + /message
+        messageUrl = `${publicUrl.replace(/\/$/, '')}${basePath}/message`;
+      } else {
+        const forwardedProto = request.headers['x-forwarded-proto'];
+        const forwardedHost  = request.headers['x-forwarded-host'];
+        const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : (forwardedProto ?? 'http');
+        const host  = Array.isArray(forwardedHost)
+          ? forwardedHost[0]
+          : (forwardedHost ?? request.headers.host ?? `${config.http?.host ?? '127.0.0.1'}:${config.http?.port ?? 3000}`);
+        messageUrl = `${proto}://${host}${basePath}/message`;
+      }
+
+      logger.info({ messageUrl }, 'Message endpoint constructed for SSE client');
       const transport = new SSEServerTransport(messageUrl, reply.raw);
       const sdkSessionId = transport.sessionId;
       this.sseTransports.set(sdkSessionId, transport);

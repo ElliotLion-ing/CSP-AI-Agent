@@ -22,6 +22,13 @@ export interface WriteFileAction {
   path: string;
   /** UTF-8 file content to write. */
   content: string;
+  /**
+   * SHA-256 hex digest of `content` (without leading "sha256:").
+   * When present, the AI MUST read the existing file at `path` (if any),
+   * compute its SHA-256, and SKIP the write if the digests match.
+   * This prevents redundant writes on incremental syncs.
+   */
+  content_hash?: string;
 }
 
 export interface DeleteFileAction {
@@ -46,6 +53,13 @@ export interface MergeMcpJsonAction {
   setup_hint?: string;
   /** Path to a local setup/readme doc if one exists in the install dir. */
   setup_doc?: string;
+  /**
+   * When true, the AI MUST skip this action if `mcpServers[server_name]`
+   * already exists in mcp.json (regardless of content).
+   * Use this for idempotent installs where re-writing would clobber
+   * user-customised values (e.g. env vars the user has already filled in).
+   */
+  skip_if_exists?: boolean;
 }
 
 export interface RemoveMcpJsonEntryAction {

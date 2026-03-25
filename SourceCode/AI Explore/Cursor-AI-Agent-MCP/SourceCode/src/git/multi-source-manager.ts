@@ -375,10 +375,15 @@ class MultiSourceGitManager {
         const stat = await fs.stat(resourceDir);
         if (stat.isDirectory()) {
           const entries = await fs.readdir(resourceDir);
-          const mdFiles = entries.filter((f) => f.endsWith('.md') || f.endsWith('.mdc'));
-          if (mdFiles.length > 0) {
+          // For mcp resources also include mcp-config.json (which is the key
+          // config file and may be the only file present in the directory).
+          const relevantFiles = entries.filter(
+            (f) => f.endsWith('.md') || f.endsWith('.mdc') ||
+              (resourceType === 'mcp' && f === 'mcp-config.json'),
+          );
+          if (relevantFiles.length > 0) {
             const results: Array<{ path: string; content: string }> = [];
-            for (const f of mdFiles) {
+            for (const f of relevantFiles) {
               const filePath = path.join(resourceDir, f);
               const content = await fs.readFile(filePath, 'utf-8');
               results.push({ path: f, content });
@@ -398,7 +403,7 @@ class MultiSourceGitManager {
           }
           logger.info(
             { source: source.name, resourceName, resourceType, dirPath: resourceDir },
-            'readResourceFiles: directory exists but contains no .md/.mdc files — trying flat file',
+            'readResourceFiles: directory exists but contains no relevant files — trying flat file',
           );
         }
       } catch { /* not a directory or doesn't exist — try flat file */ }
