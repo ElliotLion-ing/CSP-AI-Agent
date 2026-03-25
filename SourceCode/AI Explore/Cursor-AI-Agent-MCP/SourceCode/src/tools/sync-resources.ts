@@ -180,18 +180,40 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               duration: Date.now() - tDl,
             });
 
+            // When the API returns no files (expected for Command/Skill in MCP Prompt
+            // mode — content lives in the server-side git repo, not the API), fall back
+            // to reading the files directly from the local git checkout.
+            let sourceFiles = downloadResult.files;
+            if (sourceFiles.length === 0) {
+              sourceFiles = await multiSourceGitManager.readResourceFiles(
+                sub.name,
+                sub.type as 'command' | 'skill',
+              );
+              if (sourceFiles.length > 0) {
+                logToolStep('sync_resources', 'Loaded resource files from local git checkout', {
+                  resourceId: sub.id,
+                  fileCount: sourceFiles.length,
+                });
+              } else {
+                logger.warn(
+                  { resourceId: sub.id, resourceName: sub.name },
+                  'No files found via API or local git — prompt will have empty content',
+                );
+              }
+            }
+
             // Primary Markdown content selection:
             //   - skill: prefer SKILL.md (canonical entrypoint for all skill content)
             //   - command: prefer the file whose name matches the resource name
             //   - fallback: first .md file, then first file of any type
             const isSkill = sub.type === 'skill';
             const primaryFile = isSkill
-              ? (downloadResult.files.find((f) => path.basename(f.path) === 'SKILL.md') ??
-                 downloadResult.files.find((f) => f.path.endsWith('.md')) ??
-                 downloadResult.files[0])
-              : (downloadResult.files.find((f) => path.basename(f.path).replace(/\.md$/, '') === sub.name) ??
-                 downloadResult.files.find((f) => f.path.endsWith('.md')) ??
-                 downloadResult.files[0]);
+              ? (sourceFiles.find((f) => path.basename(f.path) === 'SKILL.md') ??
+                 sourceFiles.find((f) => f.path.endsWith('.md')) ??
+                 sourceFiles[0])
+              : (sourceFiles.find((f) => path.basename(f.path).replace(/\.md$/, '') === sub.name) ??
+                 sourceFiles.find((f) => f.path.endsWith('.md')) ??
+                 sourceFiles[0]);
 
             const rawContent = primaryFile?.content ?? '';
 
