@@ -296,6 +296,74 @@ class MultiSourceGitManager {
   }
 
   /**
+   * Read the files for a named Command or Skill resource from the local git
+   * checkout.  Used when the CSP API download returns an empty `files` array
+   * (which is expected for Command/Skill resources in MCP Prompt mode — the
+   * API only stores metadata; actual file content lives in the git repo).
+   *
+   * Searches all enabled sources in priority order and returns the first match.
+   *
+   * @param resourceName  The resource name as returned by the subscriptions API.
+   * @param resourceType  'command' | 'skill'
+   * @returns Array of { path, content } file entries, or [] when not found.
+   */
+  async readResourceFiles(
+    resourceName: string,
+    resourceType: 'command' | 'skill',
+  ): Promise<Array<{ path: string; content: string }>> {
+    const sources = await this.getEnabledSources();
+    // Sort by priority descending so higher-priority sources win.
+    sources.sort((a, b) => b.priority - a.priority);
+
+    const typeDir = resourceType === 'command' ? 'commands' : 'skills';
+
+    for (const source of sources) {
+      const sourcePath = path.join(this.baseDir, source.path);
+      const resourcesSubDir = source.resources[typeDir as keyof typeof source.resources];
+      const resourceDir = path.join(sourcePath, resourcesSubDir, resourceName);
+      const resourceFile = path.join(sourcePath, resourcesSubDir, `${resourceName}.md`);
+
+      // Try directory-based layout first (e.g. skills/<name>/SKILL.md)
+      try {
+        const stat = await fs.stat(resourceDir);
+        if (stat.isDirectory()) {
+          const entries = await fs.readdir(resourceDir);
+          const mdFiles = entries.filter((f) => f.endsWith('.md') || f.endsWith('.mdc'));
+          if (mdFiles.length > 0) {
+            const results: Array<{ path: string; content: string }> = [];
+            for (const f of mdFiles) {
+              const filePath = path.join(resourceDir, f);
+              const content = await fs.readFile(filePath, 'utf-8');
+              results.push({ path: f, content });
+            }
+            logger.debug(
+              { source: source.name, resourceName, resourceType, fileCount: results.length },
+              'readResourceFiles: found files in directory layout',
+            );
+            return results;
+          }
+        }
+      } catch { /* not a directory or doesn't exist — try flat file */ }
+
+      // Try flat file layout (e.g. commands/<name>.md)
+      try {
+        const content = await fs.readFile(resourceFile, 'utf-8');
+        logger.debug(
+          { source: source.name, resourceName, resourceType, filePath: resourceFile },
+          'readResourceFiles: found flat file',
+        );
+        return [{ path: `${resourceName}.md`, content }];
+      } catch { /* not found in this source — try next */ }
+    }
+
+    logger.warn(
+      { resourceName, resourceType },
+      'readResourceFiles: resource not found in any git source',
+    );
+    return [];
+  }
+
+  /**
    * Check status of all sources without pulling
    */
   async checkAllSources(): Promise<Array<{
