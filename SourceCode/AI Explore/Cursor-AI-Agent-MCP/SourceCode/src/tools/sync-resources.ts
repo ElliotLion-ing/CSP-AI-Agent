@@ -287,10 +287,24 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
         // reading the files directly from the local git checkout.
         let resourceFiles = downloadResult.files;
         if (resourceFiles.length === 0) {
+          logger.info(
+            { resourceId: sub.id, resourceName: sub.name, type: sub.type },
+            'sync_resources: API returned no files — triggering git-checkout fallback',
+          );
           const gitType = sub.type as 'command' | 'skill' | 'rule' | 'mcp';
           const gitFiles = await multiSourceGitManager.readResourceFiles(sub.name, gitType);
           if (gitFiles.length > 0) {
             resourceFiles = gitFiles;
+            logger.info(
+              {
+                resourceId: sub.id,
+                resourceName: sub.name,
+                type: sub.type,
+                fileCount: resourceFiles.length,
+                files: resourceFiles.map((f) => f.path),
+              },
+              'sync_resources: git-checkout fallback succeeded',
+            );
             logToolStep('sync_resources', 'Loaded resource files from local git checkout', {
               resourceId: sub.id,
               fileCount: resourceFiles.length,
@@ -298,7 +312,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
           } else {
             logger.warn(
               { resourceId: sub.id, resourceName: sub.name, type: sub.type },
-              'No files found via API or local git — skipping resource',
+              'sync_resources: git-checkout fallback found no files — marking resource failed',
             );
             tally.failed++;
             details.push({ id: sub.id, name: sub.name, action: 'failed', version: resourceVersion });
@@ -320,42 +334,73 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
           // ~/.cursor/mcp.json on the user's machine
           const mcpJsonPath = `${getCursorRootDirForClient()}/mcp.json`;
 
+          logger.info(
+            {
+              resourceId: sub.id,
+              resourceName: sub.name,
+              mcpJsonPath,
+              hasMcpConfigFile: !!mcpConfigFile,
+              availableFiles: resourceFiles.map((f) => f.path),
+            },
+            'sync_resources: processing MCP resource',
+          );
+
           if (mcpConfigFile) {
             let cfg: Record<string, unknown> = {};
             try { cfg = JSON.parse(mcpConfigFile.content) as Record<string, unknown>; }
-            catch { /* malformed — cfg stays empty */ }
+            catch {
+              logger.warn(
+                { resourceId: sub.id, resourceName: sub.name },
+                'sync_resources: failed to parse mcp-config.json — treating as empty config',
+              );
+            }
 
             if (typeof cfg['command'] === 'string') {
               // ── Format A: local executable ──────────────────────────────────
-              // Queue write_file for each resource file + merge_mcp_json for entry.
               const installDir = `${getCursorTypeDirForClient('mcp')}/${sub.name}`;
+              const writeActions: string[] = [];
               for (const file of resourceFiles) {
                 const normalised = path.normalize(file.path);
                 if (normalised.startsWith('..')) continue;
-                localActions.push({ action: 'write_file', path: `${installDir}/${normalised}`, content: file.content });
+                const fileDest = `${installDir}/${normalised}`;
+                localActions.push({ action: 'write_file', path: fileDest, content: file.content });
+                writeActions.push(fileDest);
               }
               const env = (cfg['env'] ?? {}) as Record<string, string>;
               const missingEnv = Object.entries(env).filter(([, v]) => v === '').map(([k]) => k);
-              // Resolve relative args to the install directory (client-side path).
               const looksLikePath = (a: string) =>
                 a.startsWith('./') || a.startsWith('../') || a.includes('/') || /\.\w+$/.test(a);
               const args = ((cfg['args'] ?? []) as string[]).map((a) =>
                 path.isAbsolute(a) || !looksLikePath(a) ? a : `${installDir}/${a.replace(/^\.\//, '')}`,
               );
+              const serverName = (cfg['name'] as string | undefined) ?? sub.name;
               localActions.push({
                 action: 'merge_mcp_json',
                 mcp_json_path: mcpJsonPath,
-                server_name: (cfg['name'] as string | undefined) ?? sub.name,
+                server_name: serverName,
                 entry: { ...cfg, args },
                 ...(missingEnv.length > 0 ? {
                   missing_env: missingEnv,
                   setup_hint: `Fill in env vars in ${mcpJsonPath} under mcpServers["${sub.name}"]: ${missingEnv.join(', ')}.`,
                 } : {}),
               });
+              logger.info(
+                {
+                  resourceId: sub.id,
+                  resourceName: sub.name,
+                  format: 'A',
+                  installDir,
+                  mcpJsonPath,
+                  serverName,
+                  writeFiles: writeActions,
+                  missingEnv,
+                },
+                'sync_resources: MCP Format A — write_file + merge_mcp_json actions queued',
+              );
               logToolStep('sync_resources', 'Local-executable MCP: write_file + merge_mcp_json queued', { resourceId: sub.id });
             } else {
               // ── Format B: remote URL map ────────────────────────────────────
-              // cfg IS the mcpServers map; one merge_mcp_json action per key.
+              const queuedServers: string[] = [];
               for (const [serverName, entry] of Object.entries(cfg)) {
                 const e = entry as Record<string, unknown>;
                 const env = (e['env'] ?? {}) as Record<string, string>;
@@ -370,29 +415,57 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                     setup_hint: `Fill in env vars in ${mcpJsonPath} under mcpServers["${serverName}"]: ${missingEnv.join(', ')}.`,
                   } : {}),
                 });
+                queuedServers.push(serverName);
               }
+              logger.info(
+                {
+                  resourceId: sub.id,
+                  resourceName: sub.name,
+                  format: 'B',
+                  mcpJsonPath,
+                  serverKeys: queuedServers,
+                },
+                'sync_resources: MCP Format B — merge_mcp_json actions queued',
+              );
               logToolStep('sync_resources', 'Remote-URL MCP: merge_mcp_json queued', {
                 resourceId: sub.id, serverKeys: Object.keys(cfg),
               });
             }
           } else {
-            // No mcp-config.json: heuristic fallback — find entry point file.
+            // No mcp-config.json: heuristic fallback
             const installDir = `${getCursorTypeDirForClient('mcp')}/${sub.name}`;
+            const writeActions: string[] = [];
             for (const file of resourceFiles) {
               const normalised = path.normalize(file.path);
               if (normalised.startsWith('..')) continue;
-              localActions.push({ action: 'write_file', path: `${installDir}/${normalised}`, content: file.content });
+              const fileDest = `${installDir}/${normalised}`;
+              localActions.push({ action: 'write_file', path: fileDest, content: file.content });
+              writeActions.push(fileDest);
             }
             const jsEntry = resourceFiles.find((f) => f.path.endsWith('.js'));
             const pyEntry = resourceFiles.find((f) => f.path.endsWith('.py'));
             const entryFile = jsEntry ?? pyEntry ?? resourceFiles[0];
             const cmd = jsEntry ? 'node' : 'python3';
+            const entryPath = `${installDir}/${entryFile?.path ?? ''}`;
             localActions.push({
               action: 'merge_mcp_json',
               mcp_json_path: mcpJsonPath,
               server_name: sub.name,
-              entry: { command: cmd, args: [`${installDir}/${entryFile?.path ?? ''}`] },
+              entry: { command: cmd, args: [entryPath] },
             });
+            logger.info(
+              {
+                resourceId: sub.id,
+                resourceName: sub.name,
+                format: 'heuristic',
+                installDir,
+                mcpJsonPath,
+                cmd,
+                entryPath,
+                writeFiles: writeActions,
+              },
+              'sync_resources: MCP heuristic fallback — write_file + merge_mcp_json actions queued',
+            );
             logToolStep('sync_resources', 'MCP heuristic fallback: write_file + merge_mcp_json queued', { resourceId: sub.id });
           }
 
@@ -406,6 +479,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
         // Use client-side path so the path resolves on the user's machine.
         if (sub.type === 'rule') {
           const typeDir = getCursorTypeDirForClient(sub.type);
+          const writeActions: string[] = [];
 
           for (const file of resourceFiles) {
             const normalised = path.normalize(file.path);
@@ -413,12 +487,25 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               logger.warn({ resourceId: sub.id, filePath: file.path }, 'Skipping suspicious file path');
               continue;
             }
+            const destPath = `${typeDir}/${normalised}`;
             localActions.push({
               action: 'write_file',
-              path: `${typeDir}/${normalised}`,
+              path: destPath,
               content: file.content,
             });
+            writeActions.push(destPath);
           }
+
+          logger.info(
+            {
+              resourceId: sub.id,
+              resourceName: sub.name,
+              typeDir,
+              fileCount: writeActions.length,
+              destPaths: writeActions,
+            },
+            'sync_resources: Rule — write_file actions queued for AI',
+          );
 
           tally.synced++;
           details.push({ id: sub.id, name: sub.name, action: 'synced', version: resourceVersion });

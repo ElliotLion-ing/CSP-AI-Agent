@@ -327,13 +327,35 @@ class MultiSourceGitManager {
     };
     const typeDir = typeToDirKey[resourceType] ?? 'skills';
 
+    logger.info(
+      {
+        resourceName,
+        resourceType,
+        resolvedDirKey: typeDir,
+        sourceCount: sources.length,
+        sourceNames: sources.map((s) => s.name),
+      },
+      'readResourceFiles: start — searching git sources for resource',
+    );
+
     for (const source of sources) {
       const sourcePath = path.join(this.baseDir, source.path);
       const resourcesSubDir = source.resources[typeDir as keyof typeof source.resources];
       const resourceDir = path.join(sourcePath, resourcesSubDir, resourceName);
       const resourceFile = path.join(sourcePath, resourcesSubDir, `${resourceName}.md`);
 
-      // Try directory-based layout first (e.g. skills/<name>/SKILL.md)
+      logger.info(
+        {
+          source: source.name,
+          resourceName,
+          resourceType,
+          tryDirPath: resourceDir,
+          tryFilePath: resourceFile,
+        },
+        'readResourceFiles: trying source',
+      );
+
+      // Try directory-based layout first (e.g. rules/<name>/ or mcp/<name>/)
       try {
         const stat = await fs.stat(resourceDir);
         if (stat.isDirectory()) {
@@ -346,28 +368,55 @@ class MultiSourceGitManager {
               const content = await fs.readFile(filePath, 'utf-8');
               results.push({ path: f, content });
             }
-            logger.debug(
-              { source: source.name, resourceName, resourceType, fileCount: results.length },
+            logger.info(
+              {
+                source: source.name,
+                resourceName,
+                resourceType,
+                dirPath: resourceDir,
+                fileCount: results.length,
+                files: results.map((r) => r.path),
+              },
               'readResourceFiles: found files in directory layout',
             );
             return results;
           }
+          logger.info(
+            { source: source.name, resourceName, resourceType, dirPath: resourceDir },
+            'readResourceFiles: directory exists but contains no .md/.mdc files — trying flat file',
+          );
         }
       } catch { /* not a directory or doesn't exist — try flat file */ }
 
-      // Try flat file layout (e.g. commands/<name>.md)
-      try {
-        const content = await fs.readFile(resourceFile, 'utf-8');
-        logger.debug(
-          { source: source.name, resourceName, resourceType, filePath: resourceFile },
-          'readResourceFiles: found flat file',
-        );
-        return [{ path: `${resourceName}.md`, content }];
-      } catch { /* not found in this source — try next */ }
+      // Try flat file layout (e.g. rules/<name>.mdc or rules/<name>.md)
+      // Also try .mdc extension for rule resources.
+      const mdcFile = path.join(sourcePath, resourcesSubDir, `${resourceName}.mdc`);
+      for (const [filePath, ext] of [[resourceFile, '.md'], [mdcFile, '.mdc']] as const) {
+        try {
+          const content = await fs.readFile(filePath, 'utf-8');
+          logger.info(
+            {
+              source: source.name,
+              resourceName,
+              resourceType,
+              filePath,
+              ext,
+              contentLength: content.length,
+            },
+            'readResourceFiles: found flat file',
+          );
+          return [{ path: `${resourceName}${ext}`, content }];
+        } catch { /* not found — try next extension or source */ }
+      }
+
+      logger.info(
+        { source: source.name, resourceName, resourceType },
+        'readResourceFiles: resource not found in this source — trying next',
+      );
     }
 
     logger.warn(
-      { resourceName, resourceType },
+      { resourceName, resourceType, resolvedDirKey: typeDir, sourceCount: sources.length },
       'readResourceFiles: resource not found in any git source',
     );
     return [];

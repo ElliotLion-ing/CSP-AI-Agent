@@ -122,7 +122,15 @@ export class PromptManager {
       };
 
       const prompts = [setupPrompt, ...resourcePrompts];
-      logger.info({ promptNames: prompts.map((p) => p.name), count: prompts.length }, 'ListPrompts called');
+      logger.info(
+        {
+          total: prompts.length,
+          setupPromptIncluded: true,
+          resourcePromptCount: resourcePrompts.length,
+          resourcePromptNames: resourcePrompts.map((p) => p.name),
+        },
+        'ListPrompts called — csp-ai-agent-setup injected as first entry',
+      );
       return { prompts };
     });
 
@@ -132,7 +140,14 @@ export class PromptManager {
 
       // ── Setup prompt: drives initial sync + local action execution ───────────
       if (name === 'csp-ai-agent-setup') {
-        logger.info({ promptName: name }, 'GetPrompt: serving csp-ai-agent-setup');
+        logger.info(
+          {
+            promptName: name,
+            userToken: userToken ? `${userToken.slice(0, 12)}...` : 'none',
+            registeredPromptCount: this.prompts.size,
+          },
+          'GetPrompt: serving csp-ai-agent-setup — AI will sync resources and apply local actions',
+        );
         const setupContent =
           `## CSP AI Agent — Initialisation\n\n` +
           `**[MANDATORY — Execute immediately, do not skip any step]**\n\n` +
