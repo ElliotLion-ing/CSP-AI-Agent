@@ -118,6 +118,7 @@ System SHALL provide feature.
 **提交前必须展示给用户确认（`git status` + `git diff`），禁止自动推送。**
 
 - **项目代码仓库：** `https://github.com/ElliotLion-ing/CSP-AI-Agent`
+- **目标分支：** `main`（直接推送到 main，禁止推送到其他分支再手动合并）
 - `AI-Resources/`、`.cursor/` 目录已在 `.gitignore` 排除，禁止提交
 
 **提交信息规范：** `<type>: <subject>`（feat / fix / docs / refactor / test / chore）
@@ -130,6 +131,7 @@ System SHALL provide feature.
 □ .gitignore 已排除不应提交的目录
 □ 用户已明确确认
 □ 目标仓库地址正确
+□ 目标分支为 main
 ```
 
 ---
@@ -146,7 +148,7 @@ cd SourceCode && npm run build && npm publish --access public
 npm view @elliotding/ai-agent-mcp@<version>
 
 # Step 3: Git 提交（仅在 npm 成功后，需用户确认）
-git add . && git commit -m "..." && git push origin <branch>
+git add . && git commit -m "..." && git push origin main
 ```
 
 - ❌ npm 发布失败不得执行 Git 提交
