@@ -27,7 +27,6 @@ import type {
   SyncResourcesParams,
   SyncResourcesResult,
   LocalAction,
-  MergeMcpJsonAction,
   ToolResult,
 } from '../types/tools';
 import { telemetry } from '../telemetry/index.js';
@@ -267,9 +266,6 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
         }
 
         // Download all files for this resource from the CSP server.
-        // We always download first so we can inspect the payload and determine
-        // whether this is a remote-URL-only MCP (Format B: config-only, no
-        // local files needed) before deciding what to write locally.
         logToolStep('sync_resources', 'Downloading resource', {
           resourceId: sub.id,
           resourceType: sub.type,
@@ -282,59 +278,117 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
           duration: Date.now() - tDl,
         });
 
-        // Detect remote-URL-only MCP: the payload contains exactly one file
-        // named mcp-config.json whose JSON has no "command" field (Format B).
-        // These servers are deployed remotely — no local files are needed.
-        // We only need to update the user's ~/.cursor/mcp.json.
-        let isRemoteUrlMcp = false;
-        const firstFile = downloadResult.files[0];
-        if (sub.type === 'mcp' && downloadResult.files.length === 1
-            && firstFile !== undefined
-            && path.basename(firstFile.path) === 'mcp-config.json') {
-          try {
-            const parsed = JSON.parse(firstFile.content) as Record<string, unknown>;
-            if (typeof parsed['command'] !== 'string') {
-              isRemoteUrlMcp = true;
-            }
-          } catch { /* malformed JSON — treat as normal MCP */ }
+        // When the API returns no files (expected when the MCP server is deployed
+        // remotely and content lives in the server-side git repo), fall back to
+        // reading the files directly from the local git checkout.
+        let resourceFiles = downloadResult.files;
+        if (resourceFiles.length === 0) {
+          const gitType = sub.type as 'rule' | 'mcp';
+          const gitFiles = await multiSourceGitManager.readResourceFiles(sub.name, gitType as any);
+          if (gitFiles.length > 0) {
+            resourceFiles = gitFiles;
+            logToolStep('sync_resources', 'Loaded resource files from local git checkout', {
+              resourceId: sub.id,
+              fileCount: resourceFiles.length,
+            });
+          } else {
+            logger.warn(
+              { resourceId: sub.id, resourceName: sub.name, type: sub.type },
+              'No files found via API or local git — skipping resource',
+            );
+            tally.failed++;
+            details.push({ id: sub.id, name: sub.name, action: 'failed', version: resourceVersion });
+            continue;
+          }
         }
 
-        if (isRemoteUrlMcp) {
-          // Remote-URL MCP (Format B): no local files needed.
-          // Return a merge_mcp_json action so the AI updates ~/.cursor/mcp.json
-          // on the user's LOCAL machine, not on this (possibly remote) server.
-          const configContent = firstFile!.content;
+        // ── MCP resource ──────────────────────────────────────────────────────
+        // Read mcp-config.json to determine Format A (local executable, has
+        // "command" field) vs Format B (remote URL map, no "command" field).
+        if (sub.type === 'mcp') {
+          const mcpConfigFile = resourceFiles.find(
+            (f) => path.basename(f.path) === 'mcp-config.json',
+          );
           const mcpJsonPath = path.join(getCursorRootDir(), 'mcp.json');
-          const entries = JSON.parse(configContent) as Record<string, unknown>;
 
-          for (const [serverName, entry] of Object.entries(entries)) {
-            const e = entry as Record<string, unknown>;
-            const env = (e['env'] ?? {}) as Record<string, string>;
-            const missingEnv = Object.entries(env)
-              .filter(([, v]) => v === '')
-              .map(([k]) => k);
+          if (mcpConfigFile) {
+            let cfg: Record<string, unknown> = {};
+            try { cfg = JSON.parse(mcpConfigFile.content) as Record<string, unknown>; }
+            catch { /* malformed — cfg stays empty */ }
 
-            const action: MergeMcpJsonAction = {
+            if (typeof cfg['command'] === 'string') {
+              // ── Format A: local executable ──────────────────────────────────
+              // Queue write_file for each resource file + merge_mcp_json for entry.
+              const installDir = path.join(getCursorTypeDir('mcp'), sub.name);
+              for (const file of resourceFiles) {
+                const normalised = path.normalize(file.path);
+                if (normalised.startsWith('..')) continue;
+                localActions.push({ action: 'write_file', path: path.join(installDir, normalised), content: file.content });
+              }
+              const env = (cfg['env'] ?? {}) as Record<string, string>;
+              const missingEnv = Object.entries(env).filter(([, v]) => v === '').map(([k]) => k);
+              // Resolve relative args to the install directory.
+              const looksLikePath = (a: string) =>
+                a.startsWith('./') || a.startsWith('../') || a.includes(path.sep) || /\.\w+$/.test(a);
+              const args = ((cfg['args'] ?? []) as string[]).map((a) =>
+                path.isAbsolute(a) || !looksLikePath(a) ? a : path.join(installDir, a),
+              );
+              localActions.push({
+                action: 'merge_mcp_json',
+                mcp_json_path: mcpJsonPath,
+                server_name: (cfg['name'] as string | undefined) ?? sub.name,
+                entry: { ...cfg, args },
+                ...(missingEnv.length > 0 ? {
+                  missing_env: missingEnv,
+                  setup_hint: `Fill in env vars in ${mcpJsonPath} under mcpServers["${sub.name}"]: ${missingEnv.join(', ')}.`,
+                } : {}),
+              });
+              logToolStep('sync_resources', 'Local-executable MCP: write_file + merge_mcp_json queued', { resourceId: sub.id });
+            } else {
+              // ── Format B: remote URL map ────────────────────────────────────
+              // cfg IS the mcpServers map; one merge_mcp_json action per key.
+              for (const [serverName, entry] of Object.entries(cfg)) {
+                const e = entry as Record<string, unknown>;
+                const env = (e['env'] ?? {}) as Record<string, string>;
+                const missingEnv = Object.entries(env).filter(([, v]) => v === '').map(([k]) => k);
+                localActions.push({
+                  action: 'merge_mcp_json',
+                  mcp_json_path: mcpJsonPath,
+                  server_name: serverName,
+                  entry: e,
+                  ...(missingEnv.length > 0 ? {
+                    missing_env: missingEnv,
+                    setup_hint: `Fill in env vars in ${mcpJsonPath} under mcpServers["${serverName}"]: ${missingEnv.join(', ')}.`,
+                  } : {}),
+                });
+              }
+              logToolStep('sync_resources', 'Remote-URL MCP: merge_mcp_json queued', {
+                resourceId: sub.id, serverKeys: Object.keys(cfg),
+              });
+            }
+          } else {
+            // No mcp-config.json: heuristic fallback — find entry point file.
+            const installDir = path.join(getCursorTypeDir('mcp'), sub.name);
+            for (const file of resourceFiles) {
+              const normalised = path.normalize(file.path);
+              if (normalised.startsWith('..')) continue;
+              localActions.push({ action: 'write_file', path: path.join(installDir, normalised), content: file.content });
+            }
+            const jsEntry = resourceFiles.find((f) => f.path.endsWith('.js'));
+            const pyEntry = resourceFiles.find((f) => f.path.endsWith('.py'));
+            const entryFile = jsEntry ?? pyEntry ?? resourceFiles[0];
+            const cmd = jsEntry ? 'node' : 'python3';
+            localActions.push({
               action: 'merge_mcp_json',
-              mcp_json_path: mcpJsonPath,
-              server_name: serverName,
-              entry: e,
-              ...(missingEnv.length > 0 ? {
-                missing_env: missingEnv,
-                setup_hint:
-                  `Fill in the following environment variables in ${mcpJsonPath} ` +
-                  `under mcpServers["${serverName}"]: ${missingEnv.join(', ')}.`,
-              } : {}),
-            };
-            localActions.push(action);
+              mcp_json_path: path.join(getCursorRootDir(), 'mcp.json'),
+              server_name: sub.name,
+              entry: { command: cmd, args: [path.join(installDir, entryFile?.path ?? '')] },
+            });
+            logToolStep('sync_resources', 'MCP heuristic fallback: write_file + merge_mcp_json queued', { resourceId: sub.id });
           }
 
           tally.synced++;
           details.push({ id: sub.id, name: sub.name, action: 'synced', version: resourceVersion });
-          logToolStep('sync_resources', 'Remote-URL MCP: merge_mcp_json action queued for AI', {
-            resourceId: sub.id,
-            serverKeys: Object.keys(entries),
-          });
           continue;
         }
 
@@ -343,7 +397,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
         if (sub.type === 'rule') {
           const typeDir = getCursorTypeDir(sub.type);
 
-          for (const file of downloadResult.files) {
+          for (const file of resourceFiles) {
             const normalised = path.normalize(file.path);
             if (normalised.startsWith('..')) {
               logger.warn({ resourceId: sub.id, filePath: file.path }, 'Skipping suspicious file path');
@@ -360,103 +414,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
           details.push({ id: sub.id, name: sub.name, action: 'synced', version: resourceVersion });
           logToolStep('sync_resources', 'Rule: write_file actions queued for AI', {
             resourceId: sub.id,
-            fileCount: downloadResult.files.length,
-          });
-          continue;
-        }
-
-        // ── Local-executable MCP resource (Format A — has "command" field) ───
-        // Return write_file + merge_mcp_json actions; the AI performs them locally.
-        if (sub.type === 'mcp') {
-          const typeDir = getCursorTypeDir(sub.type);
-          const installDir = path.join(typeDir, sub.name);
-
-          // Queue file writes.
-          for (const file of downloadResult.files) {
-            const normalised = path.normalize(file.path);
-            if (normalised.startsWith('..')) {
-              logger.warn({ resourceId: sub.id, filePath: file.path }, 'Skipping suspicious file path');
-              continue;
-            }
-            localActions.push({
-              action: 'write_file',
-              path: path.join(installDir, normalised),
-              content: file.content,
-            });
-          }
-
-          // Build the mcp.json entry from the downloaded descriptor.
-          // We replicate the Format-A detection logic from registerMcpServer()
-          // but without touching the server filesystem.
-          const mcpJsonPath = path.join(getCursorRootDir(), 'mcp.json');
-          let mcpEntry: Record<string, unknown> = {};
-          let missingEnv: string[] = [];
-          let setupHint: string | undefined;
-          let setupDoc: string | undefined;
-
-          const descriptorFile = downloadResult.files.find(
-            (f) => path.basename(f.path) === 'mcp-config.json',
-          );
-          if (descriptorFile) {
-            try {
-              const cfg = JSON.parse(descriptorFile.content) as Record<string, unknown>;
-              if (typeof cfg['command'] === 'string') {
-                // Format A: single-server descriptor
-                mcpEntry = cfg;
-              } else {
-                // Format B disguised as local — treat whole object as entries map
-                mcpEntry = cfg;
-              }
-            } catch { /* malformed — leave entry empty */ }
-          }
-
-          // Detect missing env vars.
-          const envBlock = (mcpEntry['env'] ?? {}) as Record<string, string>;
-          missingEnv = Object.entries(envBlock).filter(([, v]) => v === '').map(([k]) => k);
-          if (missingEnv.length > 0) {
-            setupHint =
-              `Fill in the following environment variables in ${mcpJsonPath} ` +
-              `under mcpServers["${sub.name}"]: ${missingEnv.join(', ')}.`;
-          }
-
-          // Check for a setup doc among downloaded files.
-          const readmeFile = downloadResult.files.find((f) =>
-            /readme/i.test(path.basename(f.path)) && f.path.endsWith('.md'),
-          );
-          if (readmeFile) {
-            setupDoc = path.join(installDir, readmeFile.path);
-          }
-
-          const mergeMcpAction: MergeMcpJsonAction = {
-            action: 'merge_mcp_json',
-            mcp_json_path: mcpJsonPath,
-            server_name: sub.name,
-            entry: Object.keys(mcpEntry).length > 0 ? mcpEntry : {
-              // Fallback: auto-detect entry point from file list.
-              command: (() => {
-                const jsEntry = downloadResult.files.find((f) => f.path.endsWith('.js'));
-                const pyEntry = downloadResult.files.find((f) => f.path.endsWith('.py'));
-                if (jsEntry) return 'node';
-                if (pyEntry) return 'python3';
-                return 'node';
-              })(),
-              args: [(() => {
-                const jsEntry = downloadResult.files.find((f) => f.path.endsWith('.js'));
-                const pyEntry = downloadResult.files.find((f) => f.path.endsWith('.py'));
-                const entryFile = jsEntry ?? pyEntry ?? downloadResult.files[0];
-                return path.join(installDir, entryFile?.path ?? '');
-              })()],
-            },
-            ...(missingEnv.length > 0 ? { missing_env: missingEnv, setup_hint: setupHint } : {}),
-            ...(setupDoc ? { setup_doc: setupDoc } : {}),
-          };
-          localActions.push(mergeMcpAction);
-
-          tally.synced++;
-          details.push({ id: sub.id, name: sub.name, action: 'synced', version: resourceVersion });
-          logToolStep('sync_resources', 'Local-executable MCP: write_file + merge_mcp_json actions queued for AI', {
-            resourceId: sub.id,
-            fileCount: downloadResult.files.length,
+            fileCount: resourceFiles.length,
           });
           continue;
         }
