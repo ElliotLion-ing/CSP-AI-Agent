@@ -315,10 +315,14 @@ export class HTTPServer {
       // See config/index.ts for details.
       const basePath = config.http?.basePath ?? '';
       const publicOrigin = config.http?.publicOrigin ?? `http://127.0.0.1:${config.http?.port ?? 3000}`;
-      const messageUrl = `${publicOrigin}${basePath}/message`;
 
-      logger.info({ messageUrl, publicOrigin }, 'Message endpoint constructed for SSE client');
-      const transport = new SSEServerTransport(messageUrl, reply.raw);
+      // We pass only the path to SSEServerTransport so its internal URL
+      // parsing produces a clean relative URL.  After connect() we re-send
+      // an absolute endpoint event so Cursor (which may sit behind a proxy
+      // with a different origin than its SSE connection) uses the correct
+      // public address for all subsequent JSON-RPC POST messages.
+      const messagePath = `${basePath}/message`;
+      const transport = new SSEServerTransport(messagePath, reply.raw);
       const sdkSessionId = transport.sessionId;
       this.sseTransports.set(sdkSessionId, transport);
 
@@ -333,7 +337,11 @@ export class HTTPServer {
         logger.warn({ sdkSessionId, error: err.message }, 'SSE transport error');
       };
 
-      // Create a per-connection MCP Server and connect it to the transport
+      // Create a per-connection MCP Server and connect it to the transport.
+      // connect() calls transport.start() which writes the initial (relative)
+      // endpoint SSE event.  We then immediately overwrite it with an absolute
+      // URL so Cursor uses the correct public address regardless of how nginx
+      // forwards the SSE connection.
       const mcpServer = this.createMcpServer(
         request.user?.userId,
         request.user?.email,
@@ -342,7 +350,17 @@ export class HTTPServer {
       );
       await mcpServer.connect(transport);
 
-      logger.info({ sdkSessionId }, 'SSE stream established');
+      // Re-send the endpoint event with the full absolute URL.
+      // This overwrites the relative-path event emitted by the SDK and
+      // ensures Cursor POSTs subsequent JSON-RPC messages (prompts/get,
+      // tools/call, etc.) to the correct externally-reachable address.
+      const absoluteMessageUrl = `${publicOrigin}${messagePath}?sessionId=${sdkSessionId}`;
+      reply.raw.write(`event: endpoint\ndata: ${absoluteMessageUrl}\n\n`);
+
+      logger.info(
+        { sdkSessionId, absoluteMessageUrl, publicOrigin },
+        'SSE stream established — absolute endpoint event sent',
+      );
 
       // Handle client disconnect
       request.raw.on('close', () => {
