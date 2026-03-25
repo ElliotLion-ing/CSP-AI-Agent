@@ -7,119 +7,15 @@
  */
 
 import * as fs from 'fs/promises';
-import * as fsSync from 'fs';
 import * as path from 'path';
 import { logger, logToolCall } from '../utils/logger';
 import { filesystemManager } from '../filesystem/manager';
 import { apiClient } from '../api/client';
 import { getCursorTypeDir, getCursorRootDir } from '../utils/cursor-paths.js';
 import { MCPServerError, createValidationError } from '../types/errors';
-import type { UninstallResourceParams, UninstallResourceResult, ToolResult } from '../types/tools';
+import type { UninstallResourceParams, UninstallResourceResult, LocalAction, ToolResult } from '../types/tools';
 import { promptManager } from '../prompts/index.js';
 
-/** Resource install entry — may be a file or a directory. */
-interface InstalledResource {
-  id: string;
-  name: string;
-  path: string;
-  isDirectory: boolean;
-}
-
-/**
- * Find installed resource files/directories by pattern.
- * - File-based types (rule, command): scan for matching .md/.mdc files
- * - Directory-based types (skill, mcp): scan for matching subdirectories
- */
-async function findInstalledResources(pattern: string): Promise<InstalledResource[]> {
-  const results: InstalledResource[] = [];
-
-  const FILE_TYPES = ['rule', 'command'] as const;
-  const DIR_TYPES  = ['skill', 'mcp']    as const;
-
-  // Scan file-based types
-  for (const type of FILE_TYPES) {
-    let typePath: string;
-    try { typePath = getCursorTypeDir(type); } catch { continue; }
-
-    try {
-      // listFiles returns relative names; build absolute paths here
-      const relNames = await filesystemManager.listFiles(typePath, /\.(md|mdc)$/);
-      for (const relName of relNames) {
-        const absPath = path.join(typePath, relName);
-        const baseName = path.basename(relName).replace(/\.(md|mdc)$/, '');
-        if (baseName === pattern || baseName.includes(pattern) || relName.includes(pattern)) {
-          results.push({ id: baseName, name: baseName, path: absPath, isDirectory: false });
-        }
-      }
-    } catch {
-      logger.debug({ type, typePath: typePath! }, 'Cursor resource type directory not found, skipping');
-    }
-  }
-
-  // Scan directory-based types
-  for (const type of DIR_TYPES) {
-    let typePath: string;
-    try { typePath = getCursorTypeDir(type); } catch { continue; }
-
-    try {
-      const entries = await fs.readdir(typePath, { withFileTypes: true });
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        if (entry.name === pattern || entry.name.includes(pattern)) {
-          results.push({
-            id: entry.name,
-            name: entry.name,
-            path: path.join(typePath, entry.name),
-            isDirectory: true,
-          });
-        }
-      }
-    } catch {
-      logger.debug({ type, typePath: typePath! }, 'Cursor resource type directory not found, skipping');
-    }
-  }
-
-  return results;
-}
-
-/**
- * Remove the mcpServers entry whose key matches `serverName` from ~/.cursor/mcp.json.
- * Writes back atomically. No-op if the file or entry does not exist.
- */
-async function removeMcpJsonEntry(serverName: string): Promise<boolean> {
-  const mcpJsonPath = path.join(getCursorRootDir(), 'mcp.json');
-  if (!fsSync.existsSync(mcpJsonPath)) return false;
-
-  try {
-    const raw = await fs.readFile(mcpJsonPath, 'utf-8');
-    const config = JSON.parse(raw) as { mcpServers?: Record<string, unknown> };
-
-    if (!config.mcpServers) return false;
-
-    // Case-insensitive search for the server entry
-    const matchedKey = Object.keys(config.mcpServers).find(
-      k => k === serverName || k.toLowerCase() === serverName.toLowerCase()
-    );
-    if (!matchedKey) return false;
-
-    delete config.mcpServers[matchedKey];
-
-    const tempPath = `${mcpJsonPath}.tmp`;
-    await fs.writeFile(tempPath, JSON.stringify(config, null, 2), 'utf-8');
-    await fs.rename(tempPath, mcpJsonPath);
-
-    logger.info({ serverName: matchedKey, mcpJsonPath }, 'Removed mcpServers entry from mcp.json');
-    return true;
-  } catch (error) {
-    logger.warn({ serverName, mcpJsonPath, error }, 'Failed to update mcp.json');
-    return false;
-  }
-}
-
-/** Recursively delete a directory and all its contents. */
-async function removeDirectory(dirPath: string): Promise<void> {
-  await fs.rm(dirPath, { recursive: true, force: true });
-}
 
 export async function uninstallResource(params: unknown): Promise<ToolResult<UninstallResourceResult>> {
   const startTime = Date.now();
@@ -133,7 +29,6 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
 
     const removedResources: Array<{ id: string; name: string; path: string }> = [];
     let subscriptionRemoved = false;
-    let mcpJsonCleaned = false;
 
     // ── Command / Skill: unregister MCP Prompt + delete cache ─────────────
     // Match registered prompt names that contain the pattern.
@@ -191,79 +86,88 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
       return { success: true, data: result };
     }
 
-    // ── Rule / MCP: original local-filesystem removal path ────────────────
-    logger.debug({ pattern }, 'Finding installed resources...');
-    const matched = await findInstalledResources(pattern);
+    // ── Rule / MCP: return LocalAction instructions for the AI to execute ────
+    // The MCP server may be running remotely; we must NOT touch the server's
+    // own filesystem.  Instead we return delete/remove instructions so the AI
+    // Agent performs them on the user's LOCAL machine.
+    logger.debug({ pattern }, 'Building local uninstall actions for Rule/MCP resource...');
 
-    if (matched.length === 0) {
+    const localActions: LocalAction[] = [];
+    const mcpJsonPath = path.join(getCursorRootDir(), 'mcp.json');
+
+    // Rule: delete matching .md/.mdc files from ~/.cursor/rules/
+    try {
+      const rulesDir = getCursorTypeDir('rule');
+      const ruleFiles = await filesystemManager.listFiles(rulesDir, /\.(md|mdc)$/);
+      for (const relName of ruleFiles) {
+        const baseName = path.basename(relName).replace(/\.(md|mdc)$/, '');
+        if (baseName === pattern || baseName.includes(pattern) || relName.includes(pattern)) {
+          const absPath = path.join(rulesDir, relName);
+          localActions.push({ action: 'delete_file', path: absPath });
+          removedResources.push({ id: baseName, name: baseName, path: absPath });
+        }
+      }
+    } catch { /* rules dir may not exist */ }
+
+    // MCP: delete install directory + remove mcp.json entry
+    try {
+      const mcpDir = getCursorTypeDir('mcp');
+      const entries = await fs.readdir(mcpDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (entry.name === pattern || entry.name.includes(pattern)) {
+          const dirPath = path.join(mcpDir, entry.name);
+          localActions.push({ action: 'delete_file', path: dirPath, recursive: true });
+          localActions.push({ action: 'remove_mcp_json_entry', mcp_json_path: mcpJsonPath, server_name: entry.name });
+          removedResources.push({ id: entry.name, name: entry.name, path: dirPath });
+        }
+      }
+    } catch { /* mcp-servers dir may not exist */ }
+
+    // Also check Remote-URL MCPs whose entry is only in mcp.json (no local dir).
+    // The pattern might match a server name in mcp.json directly.
+    if (localActions.filter(a => a.action === 'remove_mcp_json_entry').length === 0) {
+      // Add a conditional remove action — the AI will check if the key exists.
+      localActions.push({
+        action: 'remove_mcp_json_entry',
+        mcp_json_path: mcpJsonPath,
+        server_name: pattern,
+      });
+    }
+
+    if (removedResources.length === 0 && localActions.length === 0) {
       throw createValidationError(
         pattern,
         'resource_id_or_name',
-        'No installed resources found matching pattern. Use search_resources to find available resources'
+        'No installed Rule or MCP resources found matching pattern. Use search_resources to find available resources'
       );
     }
 
-    logger.info({ pattern, count: matched.length }, 'Found matching installed resources');
-
-    for (const resource of matched) {
+    // Remove from server subscription if requested
+    if (removeFromAccount) {
       try {
-        if (resource.isDirectory) {
-          // Directory-based resource (skill / mcp): remove entire directory
-          await removeDirectory(resource.path);
-          logger.debug({ resourceId: resource.id, path: resource.path }, 'Resource directory deleted');
-
-          // For MCP: also clean up mcp.json entry
-          const cleaned = await removeMcpJsonEntry(resource.name);
-          if (cleaned) mcpJsonCleaned = true;
-        } else {
-          // File-based resource (rule / command): remove single file
-          await filesystemManager.deleteResource(resource.path);
-          logger.debug({ resourceId: resource.id, path: resource.path }, 'Resource file deleted');
-        }
-
-        removedResources.push({ id: resource.id, name: resource.name, path: resource.path });
-
-        // Remove from server subscription if requested
-        if (removeFromAccount) {
-          try {
-            await apiClient.unsubscribe(resource.id);
-            subscriptionRemoved = true;
-            logger.debug({ resourceId: resource.id }, 'Resource unsubscribed from account');
-          } catch (error) {
-            logger.warn({ resourceId: resource.id, error }, 'Failed to unsubscribe resource from account');
-          }
-        }
-      } catch (error) {
-        logger.error({ resourceId: resource.id, path: resource.path, error }, 'Failed to delete resource');
+        await apiClient.unsubscribe(pattern);
+        subscriptionRemoved = true;
+      } catch (err) {
+        logger.warn({ pattern, err }, 'Failed to unsubscribe resource from account');
       }
     }
-
-    // Clean up leftover empty directories
-    for (const type of ['command', 'skill', 'rule', 'mcp']) {
-      try {
-        const typePath = getCursorTypeDir(type);
-        await filesystemManager.removeEmptyDirs(typePath);
-      } catch {
-        // Directory may not exist — ignore
-      }
-    }
-
-    const messageParts = [
-      `Successfully uninstalled ${removedResources.length} resource${removedResources.length > 1 ? 's' : ''}.`,
-      mcpJsonCleaned ? 'MCP server entry removed from ~/.cursor/mcp.json.' : null,
-      subscriptionRemoved ? 'Subscription removed from account.' : null,
-    ];
 
     const result: UninstallResourceResult = {
       success: true,
       removed_resources: removedResources,
       subscription_removed: subscriptionRemoved,
-      message: messageParts.filter(Boolean).join(' '),
+      message: [
+        `Prepared ${localActions.length} local uninstall action(s) for ${removedResources.length} resource(s).`,
+        'Execute every action in local_actions_required on the user\'s local machine.',
+        subscriptionRemoved ? 'Subscription removed from account.' : null,
+      ].filter(Boolean).join(' '),
+      local_actions_required: localActions,
     };
 
     const duration = Date.now() - startTime;
     logToolCall('uninstall_resource', 'user-id', params as Record<string, unknown>, duration);
-    logger.info({ pattern, removedCount: removedResources.length, mcpJsonCleaned, subscriptionRemoved, duration }, 'uninstall_resource completed');
+    logger.info({ pattern, actionCount: localActions.length, subscriptionRemoved, duration }, 'uninstall_resource completed');
 
     return { success: true, data: result };
 
@@ -283,9 +187,13 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
 export const uninstallResourceTool = {
   name: 'uninstall_resource',
   description:
-    'Uninstall a resource from the local machine. ' +
-    'Deletes installed files (rules/commands) or entire install directories (skills/mcp). ' +
-    'For MCP resources, also removes the mcpServers entry from ~/.cursor/mcp.json. ' +
+    'Uninstall a Rule or MCP resource from the user\'s local machine. ' +
+    'Returns `local_actions_required` — an ordered list of delete_file and ' +
+    'remove_mcp_json_entry actions that the AI Agent MUST execute on the USER\'S LOCAL MACHINE. ' +
+    'For delete_file actions: delete the file or directory at the given path. ' +
+    'For remove_mcp_json_entry actions: read ~/.cursor/mcp.json, delete the matching ' +
+    'mcpServers key, then write the file back. ' +
+    'Command and Skill resources are handled by unregistering their MCP Prompt (no local files). ' +
     'Set remove_from_account: true to also cancel the server-side subscription.',
   inputSchema: {
     type: 'object' as const,
