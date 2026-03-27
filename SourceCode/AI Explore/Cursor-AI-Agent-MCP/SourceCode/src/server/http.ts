@@ -12,8 +12,6 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
-  ListResourcesRequestSchema,
-  ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { syncResources } from '../tools/sync-resources.js';
 import { telemetry } from '../telemetry/index.js';
@@ -152,29 +150,15 @@ export class HTTPServer {
   private createMcpServer(userId?: string, email?: string, groups?: string[], userToken?: string): Server {
     const server = new Server(
       { name: 'csp-ai-agent-mcp', version: '0.2.0' },
-      // Declare resources + logging capabilities.
-      // - resources: prevents "Method not found" when Cursor probes prompt:// URIs.
-      // - logging: allows server.sendLoggingMessage() so we can push local-action
-      //   instructions to the AI after the background auto-sync completes.
-      { capabilities: { tools: {}, prompts: {}, resources: {}, logging: {} } }
+      // Declare prompts, tools, and logging capabilities only.
+      // REMOVED resources capability to align with async-pilot's working implementation.
+      // Cursor should use standard prompts/get instead of probing prompt:// as resources.
+      { capabilities: { tools: {}, prompts: {}, logging: {} } }
     );
 
     // Install Prompt list/get handlers synchronously on this Server instance.
     // Pass userToken so GetPrompt can attribute telemetry to the correct user.
     promptManager.installHandlers(server, userToken);
-
-    // resources/list — return an empty list; we don't publish static resources.
-    server.setRequestHandler(ListResourcesRequestSchema, () => ({ resources: [] }));
-
-    // resources/read — Cursor probes `prompt://<name>` URIs to check if a
-    // prompt can be read as a resource.  Return an empty text content so the
-    // client does not display an error; it will fall back to prompts/get for
-    // actual content.
-    server.setRequestHandler(ReadResourceRequestSchema, (request) => {
-      const uri = request.params.uri;
-      logger.debug({ uri }, 'resources/read probe received — returning empty content');
-      return { contents: [{ uri, text: '' }] };
-    });
 
     // tools/list
     server.setRequestHandler(ListToolsRequestSchema, () => ({
