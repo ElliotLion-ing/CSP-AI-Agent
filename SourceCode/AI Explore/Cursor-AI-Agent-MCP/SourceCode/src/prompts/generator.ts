@@ -124,10 +124,11 @@ export async function generatePromptContent(
  * @returns          Final Prompt content.
  */
 export async function generatePromptContentFromString(
-  rawContent: string,
+  rawContent: string | undefined | null,
   basePath: string,
   variables: Record<string, string> = {},
 ): Promise<string> {
+  if (!rawContent) return '';
   // Write to a temp file so parseMarkdownWithImports can resolve relative imports.
   const tmpPath = path.join(basePath, `.tmp-prompt-${Date.now()}-${process.pid}.md`);
   let result: string;

@@ -580,12 +580,15 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
         }
 
         // ── Rule resource ─────────────────────────────────────────────────────
-        // Return write_file actions; the AI writes the files locally.
-        // Each action carries content_hash so the AI can skip the write when
-        // the local file already has identical content.
+        // Return write_file actions; the AI Agent executes them on the user's
+        // LOCAL machine.  Each action carries content_hash (SHA-256) so the AI
+        // can compare against the existing local file and skip the write when
+        // the digests match — avoiding unnecessary disk I/O.  If the local file
+        // is missing or has different content, the AI writes it unconditionally,
+        // which also recovers files that were accidentally deleted by the user.
         if (sub.type === 'rule') {
           const typeDir = getCursorTypeDirForClient(sub.type);
-          const writeActions: string[] = [];
+          const writeActions: Array<{ destPath: string; hash: string; contentLength: number }> = [];
 
           for (const file of resourceFiles) {
             const normalised = path.normalize(file.path);
@@ -594,13 +597,14 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               continue;
             }
             const destPath = `${typeDir}/${normalised}`;
+            const contentHash = sha256(file.content);
             localActions.push({
               action: 'write_file',
               path: destPath,
               content: file.content,
-              content_hash: sha256(file.content),
+              content_hash: contentHash,
             });
-            writeActions.push(destPath);
+            writeActions.push({ destPath, hash: contentHash, contentLength: file.content.length });
           }
 
           logger.info(
@@ -609,9 +613,10 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               resourceName: sub.name,
               typeDir,
               fileCount: writeActions.length,
-              destPaths: writeActions,
+              files: writeActions,
+              clientSideNote: 'AI will compare content_hash against local file SHA-256; write is skipped if equal, executed if different or file missing',
             },
-            'sync_resources: Rule — write_file actions queued for AI',
+            'sync_resources: Rule — write_file actions queued for AI (client-side hash comparison)',
           );
 
           tally.synced++;

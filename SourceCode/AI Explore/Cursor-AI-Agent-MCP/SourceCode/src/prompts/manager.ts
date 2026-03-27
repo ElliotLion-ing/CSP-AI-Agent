@@ -433,6 +433,9 @@ export class PromptManager {
     // Generate and write the intermediate cache file (shared across users since
     // content is the same; only the in-memory registry is per-user).
     try {
+      if (!meta.rawContent) {
+        throw new Error('rawContent is empty — skipping cache generation');
+      }
       const tmpBase = promptCache.directory;
       promptCache.ensureDir();
       const rawExpanded = await generatePromptContentFromString(

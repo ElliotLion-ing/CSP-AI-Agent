@@ -144,39 +144,120 @@ class MultiSourceGitManager {
     try {
       const git = simpleGit(repoPath);
 
-      logger.info({ repoPath, branch }, 'Fetching latest changes...');
-
-      // If the local repo is shallow (was previously cloned with --depth),
-      // unshallow it first so subsequent fetches have a proper merge base.
-      const isShallow = (await git.raw(['rev-parse', '--is-shallow-repository'])).trim() === 'true';
-      if (isShallow) {
-        logger.info({ repoPath }, 'Shallow repo detected — running fetch --unshallow first');
-        await git.fetch(['--unshallow', 'origin', branch]);
-      } else {
-        // Fetch the branch from origin without --depth to keep full history intact.
-        await git.fetch(['origin', branch]);
+      // ── Step 1: read local HEAD commit before fetch ──────────────────────
+      let localHead = '<unknown>';
+      try {
+        localHead = (await git.revparse(['HEAD'])).trim();
+      } catch (e) {
+        logger.warn({ repoPath, error: (e as Error).message }, 'git pull: failed to read local HEAD');
       }
 
-      // Compare local HEAD with remote tip to detect changes before merging.
-      const remoteBranch = `origin/${branch}`;
-      const diffSummary = await git.diffSummary([`HEAD...${remoteBranch}`]);
-      const hasChanges = diffSummary.files.length > 0;
-
-      if (!hasChanges) {
-        logger.info({ repoPath }, 'Repository is up-to-date, no changes to pull');
-        return { hasChanges: false, filesChanged: 0 };
+      // ── Step 2: check current remotes ────────────────────────────────────
+      let remotes: Array<{ name: string; refs: { fetch: string; push: string } }> = [];
+      try {
+        remotes = await git.getRemotes(true);
+      } catch (e) {
+        logger.warn({ repoPath, error: (e as Error).message }, 'git pull: failed to list remotes');
       }
-
-      // Fast-forward only — never auto-merge diverged histories.
-      logger.info({ repoPath, filesChanged: diffSummary.files.length }, 'Pulling changes...');
-      await git.merge([remoteBranch, '--ff-only']);
 
       logger.info({
         repoPath,
+        branch,
+        localHead,
+        remotes: remotes.map((r) => ({ name: r.name, fetch: r.refs.fetch })),
+      }, 'git pull: starting — reading local state');
+
+      // ── Step 3: detect shallow repo ──────────────────────────────────────
+      let isShallow = false;
+      try {
+        isShallow = (await git.raw(['rev-parse', '--is-shallow-repository'])).trim() === 'true';
+      } catch (e) {
+        logger.warn({ repoPath, error: (e as Error).message }, 'git pull: failed to check shallow status — assuming not shallow');
+      }
+
+      logger.info({ repoPath, isShallow }, 'git pull: shallow-repository check complete');
+
+      // ── Step 4: fetch ─────────────────────────────────────────────────────
+      if (isShallow) {
+        logger.info({ repoPath, branch }, 'git pull: shallow repo detected — running fetch --unshallow');
+        try {
+          await git.fetch(['--unshallow', 'origin', branch]);
+          logger.info({ repoPath, branch }, 'git pull: fetch --unshallow succeeded');
+        } catch (fetchErr) {
+          logger.error({ repoPath, branch, error: (fetchErr as Error).message }, 'git pull: fetch --unshallow FAILED');
+          throw fetchErr;
+        }
+      } else {
+        logger.info({ repoPath, branch }, 'git pull: running fetch origin');
+        try {
+          await git.fetch(['origin', branch]);
+          logger.info({ repoPath, branch }, 'git pull: fetch origin succeeded');
+        } catch (fetchErr) {
+          logger.error({ repoPath, branch, error: (fetchErr as Error).message }, 'git pull: fetch origin FAILED');
+          throw fetchErr;
+        }
+      }
+
+      // ── Step 5: read remote HEAD after fetch ─────────────────────────────
+      const remoteBranch = `origin/${branch}`;
+      let remoteHead = '<unknown>';
+      try {
+        remoteHead = (await git.revparse([remoteBranch])).trim();
+      } catch (e) {
+        logger.warn({ repoPath, remoteBranch, error: (e as Error).message }, 'git pull: failed to read remote HEAD after fetch');
+      }
+
+      logger.info({ repoPath, localHead, remoteHead, remoteBranch }, 'git pull: comparing local HEAD vs remote HEAD');
+
+      // ── Step 6: diff to detect actual file changes ────────────────────────
+      let diffSummary = { files: [] as { file: string }[], insertions: 0, deletions: 0 };
+      try {
+        diffSummary = await git.diffSummary([`HEAD...${remoteBranch}`]);
+      } catch (e) {
+        logger.warn({ repoPath, remoteBranch, error: (e as Error).message }, 'git pull: diffSummary failed — assuming no changes');
+      }
+
+      const hasChanges = diffSummary.files.length > 0;
+
+      logger.info({
+        repoPath,
+        branch,
+        remoteBranch,
+        hasChanges,
+        filesChanged: diffSummary.files.length,
+        changedFiles: diffSummary.files.map((f) => f.file),
+        insertions: diffSummary.insertions,
+        deletions: diffSummary.deletions,
+      }, hasChanges ? 'git pull: diff found changes — will merge' : 'git pull: repository is up-to-date');
+
+      if (!hasChanges) {
+        return { hasChanges: false, filesChanged: 0 };
+      }
+
+      // ── Step 7: fast-forward merge ────────────────────────────────────────
+      logger.info({ repoPath, remoteBranch, filesChanged: diffSummary.files.length }, 'git pull: running merge --ff-only');
+      try {
+        await git.merge([remoteBranch, '--ff-only']);
+      } catch (mergeErr) {
+        logger.error({ repoPath, remoteBranch, error: (mergeErr as Error).message }, 'git pull: merge --ff-only FAILED');
+        throw mergeErr;
+      }
+
+      // ── Step 8: read new HEAD after merge ────────────────────────────────
+      let newHead = '<unknown>';
+      try {
+        newHead = (await git.revparse(['HEAD'])).trim();
+      } catch { /* non-critical */ }
+
+      logger.info({
+        repoPath,
+        branch,
+        prevHead: localHead,
+        newHead,
         filesChanged: diffSummary.files.length,
         insertions: diffSummary.insertions,
         deletions: diffSummary.deletions,
-      }, 'Repository updated successfully');
+      }, 'git pull: repository updated successfully');
 
       return { hasChanges: true, filesChanged: diffSummary.files.length };
     } catch (error) {
@@ -190,63 +271,107 @@ class MultiSourceGitManager {
   private async syncSource(source: SourceConfig): Promise<SyncResult> {
     const startTime = Date.now();
     const sourcePath = path.join(this.baseDir, source.path);
+    const branch = source.git_branch || 'main';
 
-    logger.info({ 
-      source: source.name, 
+    logger.info({
+      source: source.name,
       path: sourcePath,
-      priority: source.priority
+      priority: source.priority,
+      git_url: source.git_url ?? '(not configured)',
+      branch,
     }, 'Syncing AI Resources source...');
 
     try {
       const exists = await this.repositoryExists(sourcePath);
 
+      logger.info({
+        source: source.name,
+        sourcePath,
+        repoExists: exists,
+        git_url: source.git_url ?? null,
+        branch,
+      }, 'syncSource: repository existence check complete');
+
       if (!exists) {
-        // First time: clone repository
         if (!source.git_url) {
-          logger.warn({ source: source.name }, 'Source has no git_url configured, skipping clone');
+          // No git_url means the directory is Docker-mounted or manually placed —
+          // files should already be present on disk.  Skip clone and let
+          // readResourceFiles serve them directly.
+          logger.warn({
+            source: source.name,
+            sourcePath,
+            reason: 'git_url not configured in ai-resources-config.json',
+            hint: 'If the directory is Docker-mounted, git pull must be done manually or configured with a git_url.',
+          }, 'Source has no git_url configured, skipping clone');
           return {
             source: source.name,
             action: 'skipped',
             changes: 0,
-            duration: Date.now() - startTime
+            duration: Date.now() - startTime,
           };
         }
 
-        logger.info({ source: source.name }, 'Repository does not exist, cloning...');
-        await this.cloneRepository(
-          source.git_url,
-          sourcePath,
-          source.git_branch || 'main'
-        );
+        logger.info({ source: source.name, sourcePath, git_url: source.git_url, branch }, 'Repository does not exist, cloning...');
+        await this.cloneRepository(source.git_url, sourcePath, branch);
+        logger.info({ source: source.name, sourcePath, branch }, 'syncSource: clone succeeded');
 
         return {
           source: source.name,
           action: 'cloned',
-          changes: -1,  // -1 means full clone
-          duration: Date.now() - startTime
+          changes: -1,
+          duration: Date.now() - startTime,
         };
       } else {
-        // Repository exists: pull latest changes
-        logger.info({ source: source.name }, 'Repository exists, pulling latest changes...');
-        
-        const { hasChanges, filesChanged } = await this.pullRepository(
+        // Repository exists — check if it has a remote we can pull from.
+        if (!source.git_url) {
+          // No git_url: Docker-mounted or manual directory — cannot pull.
+          // Log clearly so operators know why git pull is not happening.
+          const existingRemote = await this.getRepoUrl(sourcePath);
+          logger.warn({
+            source: source.name,
+            sourcePath,
+            existingRemoteUrl: existingRemote ?? '(none)',
+            reason: 'git_url not configured in ai-resources-config.json',
+            hint: 'Add a git_url to ai-resources-config.json to enable automatic git pull, or pull manually.',
+          }, 'syncSource: repository exists but has no git_url — skipping pull');
+          return {
+            source: source.name,
+            action: 'skipped',
+            changes: 0,
+            duration: Date.now() - startTime,
+          };
+        }
+
+        logger.info({ source: source.name, sourcePath, git_url: source.git_url, branch }, 'Repository exists, pulling latest changes...');
+
+        const { hasChanges, filesChanged } = await this.pullRepository(sourcePath, branch);
+
+        logger.info({
+          source: source.name,
           sourcePath,
-          source.git_branch || 'main'
-        );
+          branch,
+          action: hasChanges ? 'pulled' : 'up-to-date',
+          filesChanged,
+          duration: Date.now() - startTime,
+        }, 'syncSource: pull complete');
 
         return {
           source: source.name,
           action: hasChanges ? 'pulled' : 'up-to-date',
           changes: filesChanged,
-          duration: Date.now() - startTime
+          duration: Date.now() - startTime,
         };
       }
     } catch (error) {
-      logger.error({ 
+      logger.error({
         source: source.name,
-        error: error instanceof Error ? error.message : String(error)
+        sourcePath,
+        git_url: source.git_url ?? null,
+        branch,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
       }, 'Failed to sync source');
-      
+
       throw error;
     }
   }
