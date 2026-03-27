@@ -22,13 +22,6 @@ export interface WriteFileAction {
   path: string;
   /** UTF-8 file content to write. */
   content: string;
-  /**
-   * SHA-256 hex digest of `content` (without leading "sha256:").
-   * When present, the AI MUST read the existing file at `path` (if any),
-   * compute its SHA-256, and SKIP the write if the digests match.
-   * This prevents redundant writes on incremental syncs.
-   */
-  content_hash?: string;
 }
 
 export interface DeleteFileAction {
@@ -113,6 +106,17 @@ export interface SyncResourcesParams {
    * makes API calls with their own identity.
    */
   user_token?: string;
+  /**
+   * List of MCP server names that are already configured in the user's
+   * ~/.cursor/mcp.json. The server will skip downloading and generating
+   * write_file actions for these MCP resources to reduce overhead.
+   * 
+   * Set this to the keys from mcpServers in ~/.cursor/mcp.json:
+   * Object.keys(JSON.parse(fs.readFileSync('~/.cursor/mcp.json')).mcpServers || {})
+   * 
+   * Only applies in 'incremental' mode; 'full' mode always downloads everything.
+   */
+  configured_mcp_servers?: string[];
 }
 
 export interface McpSetupItem {

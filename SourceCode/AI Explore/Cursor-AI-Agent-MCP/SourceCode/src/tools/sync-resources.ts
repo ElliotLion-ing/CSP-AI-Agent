@@ -18,7 +18,6 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { createHash } from 'crypto';
 import { logger, logToolCall, logToolStep, logToolResult } from '../utils/logger';
 import { apiClient } from '../api/client';
 import { multiSourceGitManager } from '../git/multi-source-manager';
@@ -45,10 +44,11 @@ import { promptManager } from '../prompts/index.js';
  *
  * IMPORTANT — this cache ONLY skips the network download; it NEVER skips
  * generating LocalAction instructions.  Whether the user's local files are
- * already up-to-date is determined client-side via the `content_hash` field
- * on write_file actions and `skip_if_exists` on merge_mcp_json actions.
- * This ensures a manual sync always re-delivers actions so the user can
- * recover deleted local files, even when the resource content is unchanged.
+ * already up-to-date is determined client-side by direct content comparison
+ * (string equality check) in write_file actions and `skip_if_exists` checks
+ * on merge_mcp_json actions. This ensures a manual sync always re-delivers
+ * actions so the user can recover deleted local files, even when the resource
+ * content is unchanged.
  *
  * Key format: `${userToken}::${resourceId}`
  * Value: the last downloadResource() response (hash + files).
@@ -63,11 +63,6 @@ const downloadCache = new Map<string, CachedDownload>();
 
 function syncCacheKey(userToken: string, resourceId: string): string {
   return `${userToken}::${resourceId}`;
-}
-
-/** Compute SHA-256 hex digest of a UTF-8 string. */
-function sha256(content: string): string {
-  return createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
 /**
@@ -106,8 +101,14 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
     const scope     = typedParams.scope || 'global';
     const types     = typedParams.types;
     const userToken = typedParams.user_token;
+    const configuredMcpServers = new Set(typedParams.configured_mcp_servers || []);
 
-    logToolStep('sync_resources', 'Parameters validated', { mode, scope, types });
+    logToolStep('sync_resources', 'Parameters validated', { 
+      mode, 
+      scope, 
+      types,
+      configuredMcpCount: configuredMcpServers.size,
+    });
 
     // ── Step 1: Fetch subscription list ────────────────────────────────────
     logToolStep('sync_resources', 'Step 1: Fetching subscriptions from API', { scope, types });
@@ -420,6 +421,44 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
           // ~/.cursor/mcp.json on the user's machine
           const mcpJsonPath = `${getCursorRootDirForClient()}/mcp.json`;
 
+          // ── Optimization: skip if already configured (incremental mode only) ────
+          // In incremental mode, if the AI Agent reports this MCP server is already
+          // in ~/.cursor/mcp.json, skip downloading and generating write_file actions.
+          // This reduces API calls, network traffic, and AI Agent execution overhead.
+          // In full mode, always proceed to allow file recovery.
+          if (mode === 'incremental' && mcpConfigFile) {
+            let cfg: Record<string, unknown> = {};
+            try { cfg = JSON.parse(mcpConfigFile.content) as Record<string, unknown>; }
+            catch { /* ignore parse errors, proceed to download */ }
+
+            // Format A: check if the single server is configured
+            if (typeof cfg['command'] === 'string') {
+              const serverName = (cfg['name'] as string | undefined) ?? sub.name;
+              if (configuredMcpServers.has(serverName)) {
+                logger.info(
+                  { resourceId: sub.id, resourceName: sub.name, serverName },
+                  'sync_resources: MCP server already configured — skipping download',
+                );
+                tally.cached++;
+                details.push({ id: sub.id, name: sub.name, action: 'cached', version: resourceVersion });
+                continue;
+              }
+            }
+            // Format B: check if all servers in the map are configured
+            else if (Object.keys(cfg).length > 0) {
+              const allConfigured = Object.keys(cfg).every((k) => configuredMcpServers.has(k));
+              if (allConfigured) {
+                logger.info(
+                  { resourceId: sub.id, resourceName: sub.name, serverKeys: Object.keys(cfg) },
+                  'sync_resources: All MCP servers already configured — skipping download',
+                );
+                tally.cached++;
+                details.push({ id: sub.id, name: sub.name, action: 'cached', version: resourceVersion });
+                continue;
+              }
+            }
+          }
+
           logger.info(
             {
               resourceId: sub.id,
@@ -449,13 +488,10 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                 const normalised = path.normalize(file.path);
                 if (normalised.startsWith('..')) continue;
                 const fileDest = `${installDir}/${normalised}`;
-                // Carry content_hash so the AI can skip the write when the
-                // local file already has identical content.
                 localActions.push({
                   action: 'write_file',
                   path: fileDest,
                   content: file.content,
-                  content_hash: sha256(file.content),
                 });
                 writeActions.push(fileDest);
               }
@@ -542,7 +578,6 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                 action: 'write_file',
                 path: fileDest,
                 content: file.content,
-                content_hash: sha256(file.content),
               });
               writeActions.push(fileDest);
             }
@@ -581,14 +616,14 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
 
         // ── Rule resource ─────────────────────────────────────────────────────
         // Return write_file actions; the AI Agent executes them on the user's
-        // LOCAL machine.  Each action carries content_hash (SHA-256) so the AI
-        // can compare against the existing local file and skip the write when
-        // the digests match — avoiding unnecessary disk I/O.  If the local file
-        // is missing or has different content, the AI writes it unconditionally,
-        // which also recovers files that were accidentally deleted by the user.
+        // LOCAL machine. The AI compares file content directly (string equality)
+        // against the existing local file and skips the write when content is
+        // identical — avoiding unnecessary disk I/O. If the local file is missing
+        // or has different content, the AI writes it unconditionally, which also
+        // recovers files that were accidentally deleted by the user.
         if (sub.type === 'rule') {
           const typeDir = getCursorTypeDirForClient(sub.type);
-          const writeActions: Array<{ destPath: string; hash: string; contentLength: number }> = [];
+          const writeActions: Array<{ destPath: string; contentLength: number }> = [];
 
           for (const file of resourceFiles) {
             const normalised = path.normalize(file.path);
@@ -597,14 +632,12 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               continue;
             }
             const destPath = `${typeDir}/${normalised}`;
-            const contentHash = sha256(file.content);
             localActions.push({
               action: 'write_file',
               path: destPath,
               content: file.content,
-              content_hash: contentHash,
             });
-            writeActions.push({ destPath, hash: contentHash, contentLength: file.content.length });
+            writeActions.push({ destPath, contentLength: file.content.length });
           }
 
           logger.info(
@@ -614,9 +647,9 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               typeDir,
               fileCount: writeActions.length,
               files: writeActions,
-              clientSideNote: 'AI will compare content_hash against local file SHA-256; write is skipped if equal, executed if different or file missing',
+              clientSideNote: 'AI will compare file content directly; write is skipped if content is identical',
             },
-            'sync_resources: Rule — write_file actions queued for AI (client-side hash comparison)',
+            'sync_resources: Rule — write_file actions queued for AI (client-side content comparison)',
           );
 
           tally.synced++;
@@ -740,10 +773,15 @@ export const syncResourcesTool = {
     'write_file, merge_mcp_json, or other actions that the AI Agent MUST execute on the ' +
     'USER\'S LOCAL MACHINE after receiving the response. ' +
     'Execute every action in the list in order before reporting success to the user. ' +
+    'OPTIMIZATION: Before calling this tool in incremental mode, read ~/.cursor/mcp.json ' +
+    'and pass Object.keys(mcpServers || {}) as `configured_mcp_servers` parameter. ' +
+    'This allows the server to skip downloading MCP resources that are already configured, ' +
+    'significantly reducing API calls, network traffic, and local action overhead. ' +
     'For write_file actions: ' +
-    '  (1) If the action has a `content_hash` field, read the existing file (if any), compute its SHA-256, ' +
-    '      and SKIP the write if the digests match — the file is already up-to-date. ' +
-    '  (2) Otherwise create any missing parent directories then write the file. ' +
+    '  (1) Read the existing file at `path` (if it exists) using fs.readFile() or equivalent. ' +
+    '  (2) Compare the file content directly (string equality) against the `content` field. ' +
+    '  (3) SKIP the write if they are EXACTLY equal — the file is already up-to-date. ' +
+    '  (4) Otherwise, create any missing parent directories and write the file. ' +
     'For merge_mcp_json actions: ' +
     '  (1) If the action has `skip_if_exists: true` AND `mcpServers[server_name]` already exists ' +
     '      in ~/.cursor/mcp.json, SKIP this action entirely — the server is already configured ' +
@@ -774,6 +812,14 @@ export const syncResourcesTool = {
         description:
           'DO NOT set this field — it is automatically injected by the MCP server from ' +
           'the authenticated SSE connection. The server always provides the correct token.',
+      },
+      configured_mcp_servers: {
+        type: 'array',
+        description:
+          'List of MCP server names already configured in ~/.cursor/mcp.json. ' +
+          'In incremental mode, the server skips downloading these MCP resources to reduce overhead. ' +
+          'To populate this: read ~/.cursor/mcp.json and extract Object.keys(mcpServers || {}). ' +
+          'Example: ["github", "gitlab", "postgres"]. Ignored in full mode (always downloads).',
       },
     },
   },
