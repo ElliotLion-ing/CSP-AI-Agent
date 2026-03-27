@@ -9,4 +9,5 @@ export * from './search-resources';
 export * from './upload-resource';
 export * from './uninstall-resource';
 export * from './track-usage';
+export * from './resolve-prompt-content';
 export * from './registry';

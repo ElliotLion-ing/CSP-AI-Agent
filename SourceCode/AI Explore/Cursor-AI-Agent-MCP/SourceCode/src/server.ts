@@ -19,6 +19,7 @@ import {
   uploadResourceTool,
   uninstallResourceTool,
   trackUsageTool,
+  resolvePromptContentTool,
 } from './tools';
 import { httpServer } from './server/http';
 
@@ -36,6 +37,7 @@ function registerTools() {
   toolRegistry.registerTool(uploadResourceTool);
   toolRegistry.registerTool(uninstallResourceTool);
   toolRegistry.registerTool(trackUsageTool);
+  toolRegistry.registerTool(resolvePromptContentTool);
 
   logger.info(
     { toolCount: toolRegistry.getToolCount() },

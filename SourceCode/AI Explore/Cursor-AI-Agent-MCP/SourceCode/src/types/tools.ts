@@ -219,6 +219,27 @@ export interface SearchResourcesResult {
   }>;
 }
 
+// resolve_prompt_content
+export interface ResolvePromptContentParams {
+  prompt_name?: string;
+  resource_id?: string;
+  /** CSP API token from the user's mcp.json env configuration. */
+  user_token?: string;
+  /** Optional Jira Issue ID for usage correlation. */
+  jira_id?: string;
+}
+
+export interface ResolvePromptContentResult {
+  prompt_name: string;
+  resource_id: string;
+  resource_type: 'command' | 'skill';
+  resource_name: string;
+  description: string;
+  content: string;
+  content_source: 'cache' | 'generated' | 'raw_fallback';
+  usage_tracked: boolean;
+}
+
 // upload_resource
 export interface FileEntry {
   path: string;    // Relative path under the type subdir (e.g. "my-cmd.md" or "code-review/SKILL.md")

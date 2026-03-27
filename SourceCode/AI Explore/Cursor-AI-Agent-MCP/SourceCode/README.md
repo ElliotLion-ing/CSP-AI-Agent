@@ -12,6 +12,7 @@ CSP AI Agent is an MCP server that enables seamless synchronization of AI resour
 - **Multi-source Git Support**: Aggregate resources from multiple Git repositories with priority-based conflict resolution
 - **Intelligent Caching**: Skip redundant downloads and file writes using content-based comparison
 - **MCP Prompt Mode**: Commands and Skills are registered as MCP Prompts (no local file writes)
+- **Solid Prompt Fallback**: Newly subscribed Commands and Skills can be resolved immediately through `resolve_prompt_content`
 - **Auto-configuration**: MCP servers are automatically registered in `~/.cursor/mcp.json`
 - **Telemetry & Analytics**: Track resource usage and sync health
 
@@ -163,6 +164,32 @@ await callMcpTool('track_usage', {
   resource_type: 'command',
   resource_name: 'my-command',
 });
+```
+
+#### 7. `resolve_prompt_content`
+
+Retrieve the fully resolved prompt body for a Command or Skill without relying on native `prompts/get`.
+
+```typescript
+await callMcpTool('resolve_prompt_content', {
+  prompt_name: 'command/acm-helper',
+  // or resource_id: 'cmd-client-sdk-ai-hub-acm-helper'
+});
+```
+
+**Recommended dynamic workflow:**
+
+```typescript
+await callMcpTool('search_resources', { keyword: 'acm-helper' });
+await callMcpTool('manage_subscription', {
+  action: 'subscribe',
+  resource_ids: ['resource-id'],
+});
+await callMcpTool('sync_resources', { mode: 'incremental' });
+const resolved = await callMcpTool('resolve_prompt_content', {
+  resource_id: 'resource-id',
+});
+// Execute resolved.data.content as the actual prompt body
 ```
 
 ### MCP Prompts

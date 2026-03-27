@@ -769,6 +769,8 @@ export const syncResourcesTool = {
   description:
     'Synchronize subscribed AI resources. ' +
     'Command and Skill resources are registered as MCP Prompts on the server. ' +
+    'If the user subscribed to a NEW Command or Skill in THIS conversation and you need to execute it immediately, do NOT wait for native prompts/get. ' +
+    'After this tool completes, call `resolve_prompt_content` with the new prompt_name or resource_id, then execute the returned content. ' +
     'Rule and MCP resources are returned as `local_actions_required` — an ordered list of ' +
     'write_file, merge_mcp_json, or other actions that the AI Agent MUST execute on the ' +
     'USER\'S LOCAL MACHINE after receiving the response. ' +

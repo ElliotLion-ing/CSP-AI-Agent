@@ -645,7 +645,7 @@ Authorization: Bearer {token}
 
 上报用户的 AI Resource 实际使用情况（Command/Skill Prompt 调用次数、已订阅 Rule 列表、已配置 MCP 列表）。由 MCP Server 的 TelemetryManager 每 10 秒定时触发，MCP Client 重连时立即额外上报一次，服务优雅关闭时执行最后一次上报。
 
-**架构背景**：Command 和 Skill 资源已改为 MCP Prompt 模式（不再下发实体文件到用户本地），调用经过 MCP Server handler，因此可以精确统计每次调用。Rule 和 MCP 仍下发本地，只统计已订阅/已配置列表。
+**架构背景**：Command 和 Skill 资源已改为 MCP Prompt 模式（不再下发实体文件到用户本地）。对于已注册 slash Prompt，调用经过 `prompts/get` handler；对于同轮动态订阅场景，AI 可通过 `resolve_prompt_content` tool 获取真实正文。两条链路都会在 MCP Server 侧记录使用次数。Rule 和 MCP 仍下发本地，只统计已订阅/已配置列表。
 
 - **URL**: `POST /csp/api/resources/telemetry`
 - **认证**: 需要（`Authorization: Bearer {user_token}`）
@@ -705,7 +705,7 @@ Authorization: Bearer {token}
 |------|------|------|------|
 | `client_version` | string | 是 | MCP 客户端版本号 |
 | `reported_at` | string (ISO 8601) | 是 | 上报时间戳 |
-| `events` | array | 是 | Command/Skill Prompt 调用的增量事件（可为空数组） |
+| `events` | array | 是 | Command/Skill 调用的增量事件（可为空数组）。事件来源可以是原生 `prompts/get`，也可以是 `resolve_prompt_content` 成功解析 |
 | `events[].resource_id` | string | 是 | 资源唯一 ID |
 | `events[].resource_type` | string | 是 | `command` 或 `skill` |
 | `events[].resource_name` | string | 是 | 资源名称 |
@@ -796,4 +796,3 @@ Authorization: Bearer {token}
 - **幂等性**: 成功上报后清空 `pending_events` 并更新 `last_reported_at`；服务端应按 `(user_id, resource_id, jira_id, reported_at 窗口)` 去重
 - **jira_id 聚合**: 同一资源在不同 jira_id 下单独聚合形成独立 event 条目；未传 jira_id 时该字段**完全省略**（不为 null）
 - **subscribed_rules / configured_mcps**: 每次 `sync_resources` 或 `manage_subscription` 完成后全量更新到本地文件，随每次 flush 作为快照上报
-

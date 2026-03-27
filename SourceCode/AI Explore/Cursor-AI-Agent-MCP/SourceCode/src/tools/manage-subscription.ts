@@ -84,6 +84,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           message: [
             `Successfully subscribed to ${subResult.subscriptions.length} resource${subResult.subscriptions.length > 1 ? 's' : ''}.`,
             syncSummary,
+            'If you need to execute a newly subscribed Command or Skill in this same conversation, call resolve_prompt_content next to retrieve the real prompt body.',
           ].filter(Boolean).join(' '),
           ...(syncDetails ? { sync_details: syncDetails } : {}),
           ...(pendingSetup ? { pending_setup: pendingSetup } : {}),
@@ -340,7 +341,9 @@ export const manageSubscriptionTool = {
     'When action is "subscribe" or "batch_subscribe", the tool automatically syncs ' +
     'the newly subscribed resources to the local machine immediately after subscribing ' +
     '(auto_sync defaults to true). Pass auto_sync: false only when the user explicitly ' +
-    'says they do NOT want the resource installed right now.',
+    'says they do NOT want the resource installed right now. ' +
+    'For newly subscribed Command or Skill resources that must be used immediately in the same conversation, ' +
+    'follow with `resolve_prompt_content` after sync instead of assuming Cursor will fetch the prompt body automatically.',
   inputSchema: {
     type: 'object' as const,
     properties: {
