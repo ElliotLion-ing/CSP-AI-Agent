@@ -7,6 +7,8 @@
 *.log
 logs/
 node_modules/
+.prompt-cache/
+ai-resource-telemetry.json
 
 # Source maps (optional, remove if you want them published)
 # dist/**/*.map
