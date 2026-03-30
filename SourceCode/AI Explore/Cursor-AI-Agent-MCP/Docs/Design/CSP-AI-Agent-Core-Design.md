@@ -1,14 +1,30 @@
 # CSP-AI-Agent MCP Server - 核心设计文档
 
-**版本**: v2.0  
-**日期**: 2026-03-27  
+**版本**: v2.2  
+**日期**: 2026-03-30  
 **状态**: OpenSpec Validated ✅
+
+> **📌 v2.2更新** (2026-03-30 - Manifest Strategy):
+>
+> - ✅ **SKILL.md 不下载到 skills 目录** → 仅存在于 MCP Server `.prompt-cache/` 和客户端 `.manifests/`
+> - ✅ **Cursor 无法识别为 skill** → 缺少 SKILL.md，Cursor 扫描不到
+> - ✅ **Manifest 文件独立存储** → `~/.csp-ai-agent/.manifests/<name>.md` 用于版本追踪
+> - ✅ **增量检查更高效** → 不依赖 skills 目录结构，manifest 文件即锚点
+> - ✅ **Telemetry 彻底保障** → AI 物理上找不到 SKILL.md，必须走 MCP
+
+> **📌 v2.1更新** (2026-03-30 - Path Isolation):
+>
+> - ✅ **路径隔离策略**: 复杂 Skill 下载到 `~/.csp-ai-agent/skills/<name>/` 而非 `~/.cursor/skills/<name>/`
+> - ✅ **强制 Telemetry 入口**: AI Agent 无法在默认路径自动发现本地文件，必须先调用 `resolve_prompt_content`
+> - ✅ **Rule 层面控制**: 通过 `csp-ai-prompts.mdc` 规范调用行为，无需修改 Skill 内容
+> - ✅ **通用性保证**: 适用于所有复杂 Skill（zoom-build、zoom-design-doc、hang-log-analyzer 等）
+> - ✅ **向后兼容**: 简单 Skill 行为不变，仅 MCP Prompt 无本地文件
 
 > **📌 v2.0更新** (2026-03-27 - FEAT-2026-03-27-002):
 >
 > - ✅ **混合同步策略 (Hybrid Sync)**: Command/Skill 采用双层架构（MCP Prompt + 本地脚本文件）
-> - ✅ **复杂 Skill 支持**: 含 `scripts/` 目录的 Skill 自动下载到 `~/.cursor/skills/<name>/`，支持本地脚本调用
-> - ✅ **增量更新**: 使用 SHA256 哈希对比，仅下载新增或变化的文件
+> - ✅ **复杂 Skill 支持**: 含 `scripts/` 目录的 Skill 自动下载到隔离路径，支持本地脚本调用
+> - ✅ **增量更新**: 字符串内容相等比对，仅下载新增或变化的文件
 > - ✅ **文件权限管理**: 可执行脚本自动设置 mode 755（Unix 系统）
 > - ✅ **卸载增强**: `uninstall_resource` 支持递归删除本地脚本目录
 > - ✅ **向后兼容**: 简单 Skill 行为与 v1.5 一致，无破坏性变更
@@ -528,56 +544,63 @@ promptManager.registerPrompt(meta)
   .prompt-cache/skill-6dea7a2c8cf83e5d227ee39035411730.md
   （AI 通过 prompts/get 获取，记录 telemetry）
 
-用户本地（Cursor 机器）：
-  ~/.cursor/skills/zoom-build/
-  ├── SKILL.md
-  ├── scripts/
-  │   ├── build-cli        ← mode 755, 可执行
-  │   ├── build-trigger    ← mode 755
-  │   └── build-poll
-  └── teams/
-      ├── client-android.json
-      └── client-ios.json
+用户本地（Cursor 机器 - Manifest 隔离策略）：
+  ~/.csp-ai-agent/
+  ├── skills/zoom-build/          ← 脚本目录（无 SKILL.md）
+  │   ├── scripts/
+  │   │   ├── build-cli        ← mode 755, 可执行
+  │   │   ├── build-trigger    ← mode 755
+  │   │   └── build-poll
+  │   └── teams/
+  │       ├── client-android.json
+  │       └── client-ios.json
+  └── .manifests/
+      └── zoom-build.md         ← SKILL.md 内容（版本追踪）
 
-调用流程：
+调用流程（v2.4 - Manifest 策略）：
   /skill/zoom-build
     → MCP Server: prompts/get → 统计 telemetry ✅
-    → AI 获取 SKILL.md：指引调用 ~/.cursor/skills/zoom-build/scripts/build-cli
-    → AI 执行本地脚本：node ~/.cursor/skills/zoom-build/scripts/build-cli ... ✅
+    → AI 获取 SKILL.md：指引从 ~/.csp-ai-agent/skills/zoom-build/scripts/ 读取
+    → AI 无法在 ~/.cursor/skills/ 找到 SKILL.md（Cursor 不识别） ✅
+    → AI 按 Rule 指引从隔离路径读取并执行脚本 ✅
 ```
 
-**增量同步机制（v2.0）：**
+**Manifest-Based 路径隔离优势（v2.4）：**
+- ✅ **SKILL.md 不在 skills 目录** → Cursor 无法识别为 skill
+- ✅ **AI 无法自动发现调用** → 必须先走 `resolve_prompt_content`（telemetry 保障）
+- ✅ **Manifest 独立存储** → 增量检查不依赖 skills 目录结构
+- ✅ **脚本本地缓存** → 执行性能不受影响
+- ✅ **简单 Skill 不受影响** → 纯 MCP Prompt，无本地文件
+
+**增量同步机制（v2.4 - Manifest Based）：**
 
 ```typescript
-// sync_resources 逻辑
-for (const subscription of subscriptions) {
-  const metadata = await apiClient.getResourceMetadata(subscription.id);
+// MCP Server 生成 local_actions
+const firstScript = metadata.script_files[0];
+localActions.push({
+  action: 'write_file',
+  path: `~/.csp-ai-agent/skills/${sub.name}/${firstScript.relative_path}`,
+  content: firstScript.content,
+  mode: firstScript.mode,
+  is_skill_manifest: true,  // ← 触发增量检查
+  skill_manifest_content: rawContent,  // ← SKILL.md 内容
+});
+
+// 客户端（AI Agent）执行逻辑
+if (action.is_skill_manifest) {
+  const manifestPath = `~/.csp-ai-agent/.manifests/${skillName}.md`;
+  const localManifest = fs.existsSync(manifestPath) 
+    ? fs.readFileSync(manifestPath, 'utf8') 
+    : null;
   
-  if (metadata.has_scripts && metadata.script_files) {
-    for (const file of metadata.script_files) {
-      const localPath = `~/.cursor/skills/${metadata.name}/${file.relative_path}`;
-      const expandedPath = expandPath(localPath);
-      
-      // Hash comparison
-      if (fs.existsSync(expandedPath)) {
-        const localHash = calculateFileHash(expandedPath);
-        const remoteHash = calculateContentHash(file.content);
-        
-        if (localHash === remoteHash) {
-          continue;  // Skip unchanged file
-        }
-      }
-      
-      // Download file
-      localActions.push({
-        action: 'write_file',
-        path: localPath,
-        content: file.content,
-        mode: file.mode,  // e.g. "0755" for executables
-        encoding: file.encoding || 'utf8'
-      });
-    }
+  if (localManifest === action.skill_manifest_content) {
+    // 跳过整个 skill 的所有后续 write_file actions
+    return { skipped: true };
   }
+  
+  // 否则执行所有 write_file actions，最后写入 manifest
+  // ... write all script files ...
+  fs.writeFileSync(manifestPath, action.skill_manifest_content);
 }
 ```
 

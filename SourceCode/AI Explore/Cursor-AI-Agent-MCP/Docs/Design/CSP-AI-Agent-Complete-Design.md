@@ -1,20 +1,31 @@
 # CSP-AI-Agent MCP Server - 整体设计方案
 
-**版本**: v2.0  
-**日期**: 2026-03-27  
+**版本**: v2.2  
+**日期**: 2026-03-30  
 **状态**: OpenSpec Validated ✅  
 **补充文档**: 
 - [API映射补充文档](./CSP-AI-Agent-API-Mapping.md) ⭐️
 - [多线程架构文档](./CSP-AI-Agent-MultiThread-Architecture.md) ⭐️
 - [日志记录模块设计](./CSP-AI-Agent-Logging-Design.md) 🆕
 
+> **📌 v2.2更新** (2026-03-30 - Manifest Strategy): 
+> - ✅ **SKILL.md 不下载到 skills 目录** → 仅存在于 `.prompt-cache/` 和 `.manifests/`
+> - ✅ **Manifest 独立存储** → `~/.csp-ai-agent/.manifests/<name>.md` 用于版本追踪
+> - ✅ **Cursor 无法识别** → 缺少 SKILL.md，Cursor 扫描不到
+> - ✅ **Telemetry 物理保障** → AI 找不到 SKILL.md，必须走 MCP
+
+> **📌 v2.1更新** (2026-03-30 - Path Isolation): 
+> - ✅ **路径隔离策略**: 复杂 Skill 下载到 `~/.csp-ai-agent/skills/<name>/`（而非 `~/.cursor/skills/`）
+> - ✅ **强制 Telemetry 入口**: AI 无法在默认路径发现本地文件，必须先调 `resolve_prompt_content`
+> - ✅ **Rule 层面控制**: 通过 `csp-ai-prompts.mdc` 新增"复杂 Skill 调用规范"章节
+> - ✅ **通用性保证**: 适用所有复杂 Skill，防止 telemetry 绕过
+
 > **📌 v2.0更新** (2026-03-27 - FEAT-2026-03-27-002): 
 > - ✅ **混合同步策略 (Hybrid Sync)**: Command/Skill 采用双层架构（MCP Prompt + 本地脚本文件）
-> - ✅ **复杂 Skill 支持**: 含 `scripts/` 目录的 Skill 自动下载到 `~/.cursor/skills/<name>/`
-> - ✅ **增量更新**: SHA256 哈希对比，仅下载变化文件，避免重复下载
+> - ✅ **复杂 Skill 支持**: 含 `scripts/` 目录的 Skill 自动下载到隔离路径
+> - ✅ **增量更新**: 字符串内容相等比对，仅下载变化文件
 > - ✅ **文件权限管理**: 可执行脚本自动设置 mode 755
 > - ✅ **卸载增强**: 递归删除本地脚本目录
-> - ✅ **新增工具模块**: `utils/file-hash.ts` (SHA256), `utils/file-permissions.ts` (chmod)
 
 > **📌 v1.5更新** (2026-03-09): 
 > - ✅ 新增日志记录模块设计，详见 [日志记录模块设计文档](./CSP-AI-Agent-Logging-Design.md)
@@ -368,7 +379,7 @@ Cursor IDE（开发环境）
            │   └─ 生成 write_file action:
            │       {
            │         action: 'write_file',
-           │         path: '~/.cursor/skills/zoom-build/scripts/build-cli',
+           │         path: '~/.csp-ai-agent/skills/zoom-build/scripts/build-cli',
            │         content: '#!/usr/bin/env node\n...',
            │         mode: '0755',       ← 可执行权限
            │         encoding: 'utf8'

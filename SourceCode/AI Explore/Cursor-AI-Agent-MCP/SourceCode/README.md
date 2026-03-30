@@ -78,7 +78,8 @@ Synchronize subscribed AI resources with hybrid sync strategy (v2.0).
 
 **Hybrid Sync Strategy:**
 - **Simple resources** (single markdown file): Registered as MCP Prompt only
-- **Complex skills** (with scripts): MCP Prompt + local script files in `~/.cursor/skills/<name>/`
+- **Complex skills** (with scripts): MCP Prompt + local script files in **isolated path** `~/.csp-ai-agent/skills/<name>/`
+- **Path isolation**: Complex skills NOT stored in `~/.cursor/skills/` to prevent AI auto-discovery and ensure telemetry tracking
 - **Incremental mode**: Skips unchanged files using string content equality comparison (client-side)
 
 ```typescript
@@ -391,7 +392,7 @@ Server-side (MCP Server):
   (AI fetches via prompts/get, telemetry recorded)
 
 User-side (Cursor machine):
-  ~/.cursor/skills/zoom-build/
+  ~/.csp-ai-agent/skills/zoom-build/
   ├── SKILL.md
   ├── scripts/
   │   ├── build-cli        ← mode 755 (executable)
@@ -401,13 +402,21 @@ User-side (Cursor machine):
       ├── client-android.json
       └── client-ios.json
 
-Invocation flow:
+Invocation flow (v2.4 - Manifest Strategy):
   /skill/zoom-build
     → MCP Server: prompts/get → tracks telemetry ✅
-    → AI gets SKILL.md: "Run ~/.cursor/skills/zoom-build/scripts/build-cli"
-    → AI executes local script ✅
+    → AI gets SKILL.md: "Run scripts/build-cli from ~/.csp-ai-agent/skills/zoom-build/"
+    → AI executes local script from isolated path ✅
     → Script returns build URL
 ```
+
+**Why isolated path + manifest (~/.csp-ai-agent/)?**
+- **SKILL.md NOT downloaded to skills directory** — only scripts are cached locally
+- **Manifest stored separately** in `~/.csp-ai-agent/.manifests/<name>.md` for version tracking
+- **Cursor cannot discover** the skill (missing SKILL.md in skills directory)
+- **AI cannot auto-invoke** (no SKILL.md to discover)
+- **Telemetry guaranteed** — AI must call `resolve_prompt_content` first (controlled by Rule)
+- **Scripts remain cached** — fast execution without re-download
 
 ### Resource Delivery Strategy (Legacy Reference)
 
@@ -736,6 +745,49 @@ GET /sse
 ```
 
 ## Version History
+
+### v0.1.29 (2026-03-30)
+
+**Breaking Change - Manifest-Based Path Isolation:**
+- **SKILL.md no longer downloaded to local disk** — only exists in MCP Server `.prompt-cache/` and client-side `~/.csp-ai-agent/.manifests/<name>.md`
+- **Scripts cached in isolated path** `~/.csp-ai-agent/skills/<name>/scripts/` (no SKILL.md in this directory)
+- **Cursor cannot auto-discover** skills (missing SKILL.md prevents skill recognition)
+- **Manifest file** `~/.csp-ai-agent/.manifests/<name>.md` stores SKILL.md content for incremental update checks
+- **Migration**: Run `sync_resources` with `mode: 'full'` to adopt new structure
+
+**Why This Design:**
+1. **Telemetry Guaranteed**: AI cannot find SKILL.md locally → must call `resolve_prompt_content` → telemetry recorded ✅
+2. **Performance Preserved**: Scripts remain cached locally → fast execution without re-download ✅
+3. **Atomic Updates**: Manifest comparison determines if entire skill needs re-sync ✅
+4. **Cursor Isolation**: No SKILL.md in skills directory → Cursor doesn't recognize as standalone skill ✅
+
+**Rule Enhancement:**
+- Added "二、复杂 Skill 调用规范（Telemetry 保障）" in `csp-ai-prompts.mdc`
+- Clear two-step flow: resolve_prompt_content (telemetry) → read scripts from `~/.csp-ai-agent/` (execution)
+- Universal for all complex skills (zoom-build, zoom-design-doc, hang-log-analyzer, etc.)
+
+**Technical Details:**
+- `WriteFileAction.skill_manifest_content` field: carries SKILL.md content for version comparison
+- `is_skill_manifest: true` on first script file: triggers atomic skill-level incremental check
+- Uninstall now deletes both skills directory and manifest file
+
+### v0.1.28 (2026-03-30)
+
+**Breaking Change - Path Isolation:**
+- **Complex skills now download to `~/.csp-ai-agent/skills/<name>/`** instead of `~/.cursor/skills/<name>/`
+- This prevents AI Agent from auto-discovering local files and ensures telemetry tracking
+- Forces AI to call `resolve_prompt_content` first (entry point), then read scripts from isolated path
+- **Migration**: Existing users should run `sync_resources` with `mode: 'full'` to migrate to new path
+
+**Rule Enhancement:**
+- Added "复杂 Skill 调用规范" section in `csp-ai-prompts.mdc` to standardize invocation behavior
+- Clear distinction: First call uses `resolve_prompt_content` (telemetry), internal tools read from `~/.csp-ai-agent/`
+- Universal guidance for all complex skills (zoom-build, zoom-design-doc, etc.)
+
+**Benefits:**
+- ✅ Guarantees telemetry for every skill invocation (no bypass)
+- ✅ Maintains local script caching for performance
+- ✅ Simple skills unchanged (MCP Prompt only)
 
 ### v0.1.24 (2026-03-27)
 

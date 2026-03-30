@@ -59,16 +59,26 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
 
       // ── HYBRID SYNC: Check for local script files and delete them ───────────
       // For complex skills that have local scripts downloaded via sync_resources,
-      // we need to clean up the local directory.
-      const skillDir = `${getCursorTypeDirForClient('skill')}/${pattern}`;
+      // we need to clean up:
+      // 1. Script directory: ~/.csp-ai-agent/skills/<name>/
+      // 2. Manifest file: ~/.csp-ai-agent/.manifests/<name>.md
+      const skillDir = `~/.csp-ai-agent/skills/${pattern}`;
+      const manifestFile = `~/.csp-ai-agent/.manifests/${pattern}.md`;
+      
       localActions.push({
         action: 'delete_file',
         path: skillDir,
         recursive: true,
       });
+      localActions.push({
+        action: 'delete_file',
+        path: manifestFile,
+        recursive: false,
+      });
+      
       logger.info(
-        { pattern, skillDir },
-        'Queued local skill directory deletion (will be skipped if directory does not exist)'
+        { pattern, skillDir, manifestFile },
+        'Queued local skill directory and manifest deletion (will be skipped if files do not exist)'
       );
 
       // Remove from server subscription if requested

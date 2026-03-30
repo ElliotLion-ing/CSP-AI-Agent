@@ -322,37 +322,51 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                   scriptCount: metadata.script_files.length,
                 });
 
-                const skillDir = `${getCursorTypeDirForClient(sub.type)}/${sub.name}`;
+                // Use isolated directory for complex skills (not ~/.cursor/skills/)
+                // SKILL.md is NOT downloaded — only scripts are cached locally
+                // This prevents Cursor from auto-discovering the skill while enabling script execution
+                const skillDir = `~/.csp-ai-agent/skills/${sub.name}`;
                 
-                // Generate write_file actions for ALL script files
-                // Client-side will perform SKILL.md content check first (see tool description)
+                // Generate write_file actions for script files ONLY (exclude SKILL.md)
+                // First script file carries is_skill_manifest marker for atomic update check
                 
-                // 1. SKILL.md (client checks this FIRST)
-                localActions.push({
-                  action: 'write_file',
-                  path: `${skillDir}/SKILL.md`,
-                  content: rawContent,
-                  encoding: 'utf8',
-                  mode: '0644',
-                  // Special marker: client should check this file first
-                  is_skill_manifest: true,
-                });
-                
-                // 2. All script files (client writes these ONLY if SKILL.md changed)
-                for (const scriptFile of metadata.script_files) {
-                  const localPath = `${skillDir}/${scriptFile.relative_path}`;
-                  localActions.push({
-                    action: 'write_file',
-                    path: localPath,
-                    content: scriptFile.content,
-                    encoding: scriptFile.encoding ?? 'utf8',
-                    mode: scriptFile.mode,
-                  });
+                if (metadata.script_files.length > 0) {
+                  // 1. First script file (with manifest check marker)
+                  const firstScript = metadata.script_files[0];
+                  if (!firstScript) {
+                    logger.warn({ resourceId: sub.id }, 'script_files[0] is undefined despite length > 0');
+                  } else {
+                    localActions.push({
+                      action: 'write_file',
+                      path: `${skillDir}/${firstScript.relative_path}`,
+                      content: firstScript.content,
+                      encoding: firstScript.encoding ?? 'utf8',
+                      mode: firstScript.mode,
+                      // Atomic update marker: client checks manifest FIRST
+                      is_skill_manifest: true,
+                      // SKILL.md content for version comparison (stored separately in .manifests/)
+                      skill_manifest_content: rawContent,
+                    });
+                  }
+                  
+                  // 2. Remaining script files (client writes these ONLY if manifest changed)
+                  for (let i = 1; i < metadata.script_files.length; i++) {
+                    const scriptFile = metadata.script_files[i];
+                    if (!scriptFile) continue;
+                    
+                    localActions.push({
+                      action: 'write_file',
+                      path: `${skillDir}/${scriptFile.relative_path}`,
+                      content: scriptFile.content,
+                      encoding: scriptFile.encoding ?? 'utf8',
+                      mode: scriptFile.mode,
+                    });
+                  }
                 }
                 
-                logToolStep('sync_resources', 'Script files added to local_actions_required', {
+                logToolStep('sync_resources', 'Script files added to local_actions_required (SKILL.md excluded)', {
                   resourceId: sub.id,
-                  actionCount: metadata.script_files.length + 1,  // +1 for SKILL.md
+                  actionCount: metadata.script_files.length,
                 });
               } else {
                 logToolStep('sync_resources', 'Simple skill — no local files needed', {
@@ -834,7 +848,8 @@ export const syncResourcesTool = {
   description:
     'Synchronize subscribed AI resources with hybrid sync strategy. ' +
     'Command and Skill resources: registered as MCP Prompts on the server. Complex skills with scripts ' +
-    'also download local files to enable script execution. ' +
+    'download local files to ISOLATED PATH (~/.csp-ai-agent/skills/<name>/) to prevent AI auto-discovery. ' +
+    'This ensures telemetry tracking by forcing resolve_prompt_content as entry point. ' +
     'If the user subscribed to a NEW Command or Skill in THIS conversation and you need to execute it immediately, do NOT wait for native prompts/get. ' +
     'After this tool completes, call `resolve_prompt_content` with the new prompt_name or resource_id, then execute the returned content. ' +
     'Rule and MCP resources are returned as `local_actions_required` — an ordered list of ' +
@@ -847,10 +862,14 @@ export const syncResourcesTool = {
     'significantly reducing API calls, network traffic, and local action overhead. ' +
     'For write_file actions: ' +
     '  SPECIAL HANDLING FOR COMPLEX SKILLS (when action has `is_skill_manifest: true`): ' +
-    '    (1) This action is for SKILL.md — check content equality FIRST. ' +
-    '    (2) Read local SKILL.md file (if it exists). ' +
-    '    (3) If local content === action.content (string equality), SKIP this action AND ALL SUBSEQUENT write_file actions for this skill (until next skill or different action type). ' +
-    '    (4) If content differs or file missing, PROCEED with this action and all subsequent write_file actions for this skill. ' +
+    '    (1) This action is the FIRST script file — check skill version using manifest FIRST. ' +
+    '    (2) Read manifest file at ~/.csp-ai-agent/.manifests/<skill-name>.md (if exists). ' +
+    '    (3) Compare manifest content with action.skill_manifest_content field (string equality). ' +
+    '    (4) If identical: SKIP this action AND ALL SUBSEQUENT write_file actions for this skill. ' +
+    '    (5) If different or manifest missing: ' +
+    '        - PROCEED with this action and all subsequent write_file actions for this skill. ' +
+    '        - After writing all script files, write action.skill_manifest_content to ~/.csp-ai-agent/.manifests/<skill-name>.md ' +
+    '    (6) NOTE: SKILL.md is NEVER written to the skills directory (only to .manifests/) to prevent Cursor auto-discovery. ' +
     '  GENERAL HANDLING (when action has NO `is_skill_manifest` marker): ' +
     '    (1) Read the existing file at `path` (if it exists) using fs.readFile() or equivalent. ' +
     '    (2) Compare the file content directly (string equality) against the `content` field. ' +

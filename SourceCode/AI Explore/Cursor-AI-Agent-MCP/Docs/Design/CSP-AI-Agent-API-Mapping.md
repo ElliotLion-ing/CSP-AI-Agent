@@ -283,7 +283,7 @@ if (metadata.has_scripts && metadata.script_files) {
   for (const scriptFile of metadata.script_files) {
     localActions.push({
       action: 'write_file',
-      path: `~/.cursor/skills/${sub.name}/${scriptFile.relative_path}`,
+      path: `~/.csp-ai-agent/skills/${sub.name}/${scriptFile.relative_path}`,
       content: scriptFile.content,
       mode: scriptFile.mode,
       encoding: scriptFile.encoding,
@@ -910,7 +910,7 @@ Authorization: Bearer {token}
   "local_actions_required": [
     {
       "action": "write_file",
-      "path": "~/.cursor/skills/zoom-build/scripts/build-cli",
+      "path": "~/.csp-ai-agent/skills/zoom-build/scripts/build-cli",
       "content": "#!/usr/bin/env node\n...",
       "mode": "0755",
       "encoding": "utf8"
@@ -1022,7 +1022,7 @@ for (const action of result.local_actions_required || []) {
   "local_actions_required": [
     {
       "action": "delete_file",
-      "path": "~/.cursor/skills/zoom-build",
+      "path": "~/.csp-ai-agent/skills/zoom-build",
       "recursive": true
     }
   ]
@@ -1078,9 +1078,10 @@ for (const action of result.local_actions_required || []) {
 ③ MCP Server 返回 SKILL.md 内容（动态解析 import 和变量）
   ↓
 ④ AI 读取 SKILL.md，发现指令：
-   "调用 ~/.cursor/skills/zoom-build/scripts/build-cli trigger --preset dev"
+   "从 ~/.csp-ai-agent/skills/zoom-build/scripts/build-cli 读取脚本并执行"
   ↓
-⑤ AI 执行 Shell 命令：node ~/.cursor/skills/zoom-build/scripts/build-cli ...
+⑤ AI 按 Rule 指引从隔离路径执行脚本：
+   node ~/.csp-ai-agent/skills/zoom-build/scripts/build-cli trigger --preset dev
   ↓
 ⑥ 本地脚本运行，返回构建 URL ✅
   ↓

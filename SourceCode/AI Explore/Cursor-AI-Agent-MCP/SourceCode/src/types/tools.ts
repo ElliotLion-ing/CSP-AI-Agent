@@ -27,12 +27,25 @@ export interface WriteFileAction {
   /** File permissions in octal string format (e.g. "0755" for executable, "0644" for regular). Unix only. */
   mode?: string;
   /** 
-   * Special marker for SKILL.md files in complex skills.
-   * When true, client should check this file's content FIRST.
-   * If content matches local file exactly (string equality), skip this action AND all subsequent write_file actions until next skill or different action type.
-   * This enables atomic skill-level updates (skip all or download all).
+   * Special marker for the FIRST script file in complex skills.
+   * When true, client should perform atomic skill-level incremental check:
+   * 1. Read manifest file at ~/.csp-ai-agent/.manifests/<skill-name>.md (if exists)
+   * 2. Compare manifest content with skill_manifest_content field (string equality)
+   * 3. If identical: skip this action AND all subsequent write_file actions for this skill
+   * 4. If different or manifest missing: 
+   *    - Execute this action and all subsequent write_file actions
+   *    - Write skill_manifest_content to ~/.csp-ai-agent/.manifests/<skill-name>.md
+   * 
+   * This enables atomic skill updates while keeping SKILL.md out of the skills directory
+   * (preventing Cursor from auto-discovering it as a standalone skill).
    */
   is_skill_manifest?: boolean;
+  /**
+   * SKILL.md content for incremental comparison (present when is_skill_manifest=true).
+   * This content is NOT written to the path field — it's only used for version checking
+   * and stored in the manifest directory.
+   */
+  skill_manifest_content?: string;
 }
 
 export interface DeleteFileAction {
