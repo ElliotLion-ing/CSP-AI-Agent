@@ -191,60 +191,122 @@ ETag: "sha256:xyz789..."
         "path": "SKILL.md",
         "content": "# Code Review Skill\n..."
       },
-      {
-        "path": "examples/demo.md",
-        "content": "# Demo\n..."
-      }
-    ]
+
+## 3.1 获取资源元数据（客户端本地扫描）
+
+### ⚡ 架构改进（v2.1 - 2026-03-27）
+
+**不再需要服务端 API！** MCP Server 已通过 Git 仓库完整拉取所有 AI 资源文件到本地（`AI-Resources/` 目录），可以直接扫描本地文件系统生成元数据。
+
+### 实现方式
+
+**核心模块：** `SourceCode/src/git/multi-source-manager.ts`
+
+**新增方法：**
+
+```typescript
+/**
+ * Scan resource directory and generate metadata (has_scripts, script_files).
+ * 
+ * @param resourceName - Resource name
+ * @param resourceType - Resource type
+ * @returns Metadata object with has_scripts and script_files
+ */
+async scanResourceMetadata(
+  resourceName: string,
+  resourceType: 'command' | 'skill' | 'rule' | 'mcp'
+): Promise<{
+  has_scripts: boolean;
+  script_files?: Array<{
+    relative_path: string;
+    content: string;
+    mode?: string;
+    encoding: 'utf8' | 'base64';
+  }>;
+}>
+```
+
+**扫描逻辑：**
+
+1. **递归读取目录：** 调用 `readResourceFiles(name, type, includeAllFiles: true)` 获取所有文件
+2. **启发式检测：** 检查是否存在 `scripts/`、`teams/`、`references/` 目录
+3. **权限推断：**
+   - `scripts/` 下非 `.json`/`.md`/`.txt` 文件 → `0755`（可执行）
+   - 其他文件 → `0644`（普通文件）
+4. **构建元数据：** 返回 `has_scripts` + `script_files` 数组（排除主文件 SKILL.md/COMMAND.md/README.md）
+
+### 返回格式示例
+
+**简单 Skill（无脚本）：**
+
+```json
+{
+  "has_scripts": false
+}
+```
+
+**复杂 Skill（含脚本）：**
+
+```json
+{
+  "has_scripts": true,
+  "script_files": [
+    {
+      "relative_path": "scripts/build-cli",
+      "content": "#!/usr/bin/env node\nconsole.log('Build CLI');",
+      "mode": "0755",
+      "encoding": "utf8"
+    },
+    {
+      "relative_path": "teams/client-android.json",
+      "content": "{\"project\":\"client-android\"}",
+      "mode": "0644",
+      "encoding": "utf8"
+    }
+  ]
+}
+```
+
+### 调用方
+
+**`sync_resources` MCP Tool**（在 `SourceCode/src/tools/sync-resources.ts`）：
+
+```typescript
+// After registering MCP Prompt, scan for local scripts
+const metadata = await multiSourceGitManager.scanResourceMetadata(
+  sub.name,
+  sub.type as 'command' | 'skill'
+);
+
+if (metadata.has_scripts && metadata.script_files) {
+  // Generate local write_file actions for scripts
+  for (const scriptFile of metadata.script_files) {
+    localActions.push({
+      action: 'write_file',
+      path: `~/.cursor/skills/${sub.name}/${scriptFile.relative_path}`,
+      content: scriptFile.content,
+      mode: scriptFile.mode,
+      encoding: scriptFile.encoding,
+    });
   }
 }
 ```
 
-**说明：**
-- `files[].path` 是文件在资源目录内的相对路径（不含资源名前缀）
-- 单文件资源（command / rule）的 `files` 数组中只有一个元素
-- 客户端按 `files[].path` 在 Cursor 目录内重建目录结构
+### 优势
 
-### Response — Not Modified (304)
+| 优势 | 说明 |
+|------|------|
+| **零服务端依赖** | 不需要新增 REST API 端点，无需协调后端团队 |
+| **实时准确** | 直接反映 Git Working Directory 的最新状态 |
+| **高性能** | 本地文件系统访问，无网络延迟 |
+| **完整权限支持** | 精确推断可执行脚本权限（0755） |
+| **简化架构** | 减少 API Client → REST API 的远程调用链路 |
 
-```
-HTTP/1.1 304 Not Modified
-ETag: "sha256:def456..."
-```
+</details>
 
-资源未变更，客户端使用本地缓存。
-
-### Response — Not Found (404)
-
-```json
-{
-  "code": 4008,
-  "result": "failed",
-  "message": "not found"
-}
-```
+---
 
 ## 4. 上传资源内容（暂存）
-
-上传资源文件内容到服务端暂存，返回 upload_id。需后续调用 finalize 接口完成 Git 提交。
-
-统一使用 `files[]` 数组上传，单文件资源只需数组中放一个元素即可，目录结构通过 `path` 字段保留。
-
-- **URL**: `POST /csp/api/resources/upload`
-- **Content-Type**: `application/json`
-- **认证**: 需要
-
-### Request Body
-
-| 参数              | 类型     | 必填  | 说明                                         |
-| --------------- | ------ | --- | ------------------------------------------ |
-| type            | String | 是   | 资源类型: `command` / `skill` / `rule` / `mcp` |
-| name            | String | 是   | 资源名称（不含扩展名）                                |
-| files           | Array  | 是   | 文件列表，至少包含一个元素                              |
-| files[].path    | String | 是   | 文件在资源内的相对路径，不允许 `../` 等路径穿越               |
-| files[].content | String | 是   | 文件的文本内容                                    |
-
-### Request Example — 单文件（command）
 
 ```json
 {
@@ -796,3 +858,244 @@ Authorization: Bearer {token}
 - **幂等性**: 成功上报后清空 `pending_events` 并更新 `last_reported_at`；服务端应按 `(user_id, resource_id, jira_id, reported_at 窗口)` 去重
 - **jira_id 聚合**: 同一资源在不同 jira_id 下单独聚合形成独立 event 条目；未传 jira_id 时该字段**完全省略**（不为 null）
 - **subscribed_rules / configured_mcps**: 每次 `sync_resources` 或 `manage_subscription` 完成后全量更新到本地文件，随每次 flush 作为快照上报
+
+---
+
+## 附录：MCP Tools 映射（客户端工具）
+
+以下 MCP Tools 是 MCP Server 提供给 Cursor AI 的客户端工具，用于资源管理操作。
+
+### Tool 1: sync_resources
+
+**功能：** 同步订阅的 AI 资源到本地，支持混合同步策略（Hybrid Sync）。
+
+**混合同步策略（v2.0+）：**
+- **简单 Skill/Command**（单 `.md` 文件）：仅注册为 MCP Prompt，不下载到本地
+- **复杂 Skill**（含 `scripts/`、`teams/` 等目录）：同时注册 MCP Prompt + 下载脚本到本地
+- **Rule/MCP**：下载到本地文件系统
+
+**增量更新：**
+- 使用 SHA256 哈希对比本地文件与远程内容
+- 仅下载新增或变化的文件
+- 跳过已是最新的文件
+
+**Input Parameters:**
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `mode` | String (enum) | 否 | `incremental` | `check` (仅检查状态), `incremental` (跳过未变化文件), `full` (强制全量) |
+| `scope` | String (enum) | 否 | `global` | `global` (~/.cursor/), `workspace` (.cursor/), `all` |
+| `types` | Array[String] | 否 | `[]` (all) | 过滤资源类型 (command, skill, rule, mcp) |
+| `configured_mcp_servers` | Array[String] | 否 | `[]` | 已配置的 MCP Server 名称列表（用于跳过已安装的 MCP） |
+
+**Output:**
+
+```json
+{
+  "mode": "incremental",
+  "health_score": 100,
+  "summary": {
+    "total": 10,
+    "synced": 8,
+    "cached": 0,
+    "skipped": 2,
+    "failed": 0
+  },
+  "skipped_resources": [
+    {
+      "name": "zoom-build",
+      "reason": "already_up_to_date"
+    }
+  ],
+  "local_actions_required": [
+    {
+      "action": "write_file",
+      "path": "~/.cursor/skills/zoom-build/scripts/build-cli",
+      "content": "#!/usr/bin/env node\n...",
+      "mode": "0755",
+      "encoding": "utf8"
+    }
+  ]
+}
+```
+
+**关键字段说明：**
+- `skipped`: 增量模式下跳过的资源数量（本地已是最新）
+- `skipped_resources`: 被跳过资源的详细信息（含原因）
+- `local_actions_required`: AI 必须在用户本地机器执行的文件操作指令
+
+**调用示例（AI Agent 侧）：**
+
+```typescript
+// Step 1: Read configured MCPs
+const mcpJson = JSON.parse(fs.readFileSync('~/.cursor/mcp.json', 'utf8'));
+const configuredMcps = Object.keys(mcpJson.mcpServers || {});
+
+// Step 2: Sync resources
+const result = await mcpClient.callTool('sync_resources', {
+  mode: 'incremental',
+  configured_mcp_servers: configuredMcps
+});
+
+// Step 3: Execute local actions
+for (const action of result.local_actions_required || []) {
+  if (action.action === 'write_file') {
+    // Check if file already up-to-date
+    const localPath = expandPath(action.path);
+    const localContent = fs.existsSync(localPath) 
+      ? fs.readFileSync(localPath, 'utf8') 
+      : null;
+    
+    if (localContent === action.content) {
+      console.log(`Skipped (already up-to-date): ${action.path}`);
+      continue;
+    }
+    
+    // Write file
+    fs.mkdirSync(path.dirname(localPath), { recursive: true });
+    fs.writeFileSync(localPath, action.content, action.encoding || 'utf8');
+    
+    // Set permissions (Unix only)
+    if (action.mode && process.platform !== 'win32') {
+      fs.chmodSync(localPath, parseInt(action.mode, 8));
+    }
+  }
+}
+```
+
+---
+
+### Tool 2: manage_subscription
+
+（保持现有文档不变）
+
+---
+
+### Tool 3: search_resources
+
+（保持现有文档不变）
+
+---
+
+### Tool 4: resolve_prompt_content
+
+（保持现有文档不变）
+
+---
+
+### Tool 5: upload_resource
+
+（保持现有文档不变）
+
+---
+
+### Tool 6: uninstall_resource
+
+**功能：** 卸载资源（移除本地文件 + 可选取消订阅）
+
+**混合卸载策略（v2.0+）：**
+- **Command/Skill**：注销 MCP Prompt + 删除本地脚本目录（如果存在）
+- **Rule**：删除 `~/.cursor/rules/<name>.mdc`
+- **MCP**：删除 `~/.cursor/mcp-servers/<name>/` + 移除 `mcp.json` 条目
+
+**Input Parameters:**
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `resource_id_or_name` | String | 是 | — | 资源 ID、名称或模糊匹配模式 |
+| `remove_from_account` | Boolean | 否 | `false` | 是否同时取消服务端订阅 |
+
+**Output:**
+
+```json
+{
+  "success": true,
+  "removed_resources": [
+    {
+      "id": "skill-complex-001",
+      "name": "zoom-build",
+      "path": "[MCP Prompt: general/skill/zoom-build]"
+    }
+  ],
+  "subscription_removed": true,
+  "message": "Successfully unregistered 1 MCP Prompt. Local skill directory cleanup action queued (execute local_actions_required). Subscription removed from account.",
+  "local_actions_required": [
+    {
+      "action": "delete_file",
+      "path": "~/.cursor/skills/zoom-build",
+      "recursive": true
+    }
+  ]
+}
+```
+
+**AI Agent 执行逻辑：**
+
+```typescript
+const result = await mcpClient.callTool('uninstall_resource', {
+  resource_id_or_name: 'zoom-build',
+  remove_from_account: true
+});
+
+// Execute local cleanup actions
+for (const action of result.local_actions_required || []) {
+  if (action.action === 'delete_file') {
+    const localPath = expandPath(action.path);
+    if (fs.existsSync(localPath)) {
+      fs.rmSync(localPath, { 
+        recursive: action.recursive || false, 
+        force: true 
+      });
+      console.log(`Deleted: ${action.path}`);
+    }
+  }
+}
+```
+
+---
+
+## 混合同步架构总览（v2.0+）
+
+### 资源分发策略
+
+| 资源类型 | MCP Prompt 注册 | 本地文件下载 | 判断标准 |
+|---------|---------------|------------|---------|
+| **简单 Command** | ✅ | ❌ | 单 `.md` 文件 |
+| **简单 Skill** | ✅ | ❌ | 仅 `SKILL.md`，无 `scripts/` 目录 |
+| **复杂 Skill** | ✅ | ✅ | `has_scripts=true`（含 `scripts/`、`teams/` 等） |
+| **Rule** | ❌ | ✅ | Cursor 引擎要求本地文件 |
+| **MCP** | ❌ | ✅ | Cursor 引擎要求本地安装 |
+
+### 调用流程（复杂 Skill 示例）
+
+```
+用户调用 /skill/zoom-build
+  ↓
+① Cursor 发起 MCP 请求：prompts/get('general/skill/zoom-build')
+  ↓
+② MCP Server 记录 telemetry（resource_name, invocation_count, timestamp）
+  ↓
+③ MCP Server 返回 SKILL.md 内容（动态解析 import 和变量）
+  ↓
+④ AI 读取 SKILL.md，发现指令：
+   "调用 ~/.cursor/skills/zoom-build/scripts/build-cli trigger --preset dev"
+  ↓
+⑤ AI 执行 Shell 命令：node ~/.cursor/skills/zoom-build/scripts/build-cli ...
+  ↓
+⑥ 本地脚本运行，返回构建 URL ✅
+  ↓
+⑦ AI 将结果返回给用户
+```
+
+**关键优势：**
+- ✅ Telemetry 数据 100% 覆盖（所有调用经过 MCP Server）
+- ✅ 复杂 Skill 可调用本地脚本和配置
+- ✅ 增量同步减少带宽（仅下载变化文件）
+
+---
+
+## 版本历史
+
+- **v1.0** (2026-03-10): 初始 REST API 设计
+- **v1.5** (2026-03-15): 纯 MCP Prompt 模式（telemetry 支持）
+- **v2.0** (2026-03-27): 混合同步策略（Prompt + 本地脚本）

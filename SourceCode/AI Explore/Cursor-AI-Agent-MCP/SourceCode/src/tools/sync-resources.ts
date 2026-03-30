@@ -153,13 +153,18 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
       count: subscriptions.total,
     });
 
-    const tally = { total: subscriptions.total, synced: 0, cached: 0, failed: 0 };
+    const tally = { total: subscriptions.total, synced: 0, cached: 0, skipped: 0, failed: 0 };
 
     const details: Array<{
       id: string;
       name: string;
-      action: 'synced' | 'cached' | 'failed';
+      action: 'synced' | 'cached' | 'skipped' | 'failed';
       version: string;
+    }> = [];
+
+    const skippedResources: Array<{
+      name: string;
+      reason: 'already_up_to_date' | 'no_local_sync_needed' | 'mcp_already_configured';
     }> = [];
 
     // Accumulated local file-system actions the AI must perform on the user's machine.
@@ -301,6 +306,65 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
 
             // Track this prompt name so stale prompts can be pruned after the loop.
             expectedPromptNames.add(promptManager.buildPromptName(meta));
+
+            // ── HYBRID SYNC: Check if skill/command needs local scripts ────────
+            // Use MCP Server's local git manager to scan for scripts.
+            // This eliminates the need for server-side metadata API endpoint.
+            try {
+              const metadata = await multiSourceGitManager.scanResourceMetadata(
+                sub.name,
+                sub.type as 'command' | 'skill'
+              );
+              
+              if (metadata.has_scripts && metadata.script_files) {
+                logToolStep('sync_resources', 'Complex skill detected — generating local actions', {
+                  resourceId: sub.id,
+                  scriptCount: metadata.script_files.length,
+                });
+
+                const skillDir = `${getCursorTypeDirForClient(sub.type)}/${sub.name}`;
+                
+                // Generate write_file actions for ALL script files
+                // Client-side will perform SKILL.md content check first (see tool description)
+                
+                // 1. SKILL.md (client checks this FIRST)
+                localActions.push({
+                  action: 'write_file',
+                  path: `${skillDir}/SKILL.md`,
+                  content: rawContent,
+                  encoding: 'utf8',
+                  mode: '0644',
+                  // Special marker: client should check this file first
+                  is_skill_manifest: true,
+                });
+                
+                // 2. All script files (client writes these ONLY if SKILL.md changed)
+                for (const scriptFile of metadata.script_files) {
+                  const localPath = `${skillDir}/${scriptFile.relative_path}`;
+                  localActions.push({
+                    action: 'write_file',
+                    path: localPath,
+                    content: scriptFile.content,
+                    encoding: scriptFile.encoding ?? 'utf8',
+                    mode: scriptFile.mode,
+                  });
+                }
+                
+                logToolStep('sync_resources', 'Script files added to local_actions_required', {
+                  resourceId: sub.id,
+                  actionCount: metadata.script_files.length + 1,  // +1 for SKILL.md
+                });
+              } else {
+                logToolStep('sync_resources', 'Simple skill — no local files needed', {
+                  resourceId: sub.id,
+                });
+              }
+            } catch (metadataErr) {
+              logger.warn(
+                { resourceId: sub.id, error: (metadataErr as Error).message },
+                'Failed to scan metadata for hybrid sync — continuing with Prompt-only registration',
+              );
+            }
 
             // Clean up any legacy local files that may have been written by an
             // older version of sync_resources.  Command/Skill resources are now
@@ -689,7 +753,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
 
     // ── Step 5: Health score ───────────────────────────────────────────────
     const healthScore = tally.total > 0
-      ? Math.round(((tally.synced + tally.cached) / tally.total) * 100)
+      ? Math.round(((tally.synced + tally.cached + tally.skipped) / tally.total) * 100)
       : 100;
 
     const result: SyncResourcesResult = {
@@ -697,6 +761,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
       health_score: healthScore,
       summary: tally,
       details,
+      ...(skippedResources.length > 0 ? { skipped_resources: skippedResources } : {}),
       ...(localActions.length > 0 ? { local_actions_required: localActions } : {}),
     };
 
@@ -767,8 +832,9 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
 export const syncResourcesTool = {
   name: 'sync_resources',
   description:
-    'Synchronize subscribed AI resources. ' +
-    'Command and Skill resources are registered as MCP Prompts on the server. ' +
+    'Synchronize subscribed AI resources with hybrid sync strategy. ' +
+    'Command and Skill resources: registered as MCP Prompts on the server. Complex skills with scripts ' +
+    'also download local files to enable script execution. ' +
     'If the user subscribed to a NEW Command or Skill in THIS conversation and you need to execute it immediately, do NOT wait for native prompts/get. ' +
     'After this tool completes, call `resolve_prompt_content` with the new prompt_name or resource_id, then execute the returned content. ' +
     'Rule and MCP resources are returned as `local_actions_required` — an ordered list of ' +
@@ -780,10 +846,17 @@ export const syncResourcesTool = {
     'This allows the server to skip downloading MCP resources that are already configured, ' +
     'significantly reducing API calls, network traffic, and local action overhead. ' +
     'For write_file actions: ' +
-    '  (1) Read the existing file at `path` (if it exists) using fs.readFile() or equivalent. ' +
-    '  (2) Compare the file content directly (string equality) against the `content` field. ' +
-    '  (3) SKIP the write if they are EXACTLY equal — the file is already up-to-date. ' +
-    '  (4) Otherwise, create any missing parent directories and write the file. ' +
+    '  SPECIAL HANDLING FOR COMPLEX SKILLS (when action has `is_skill_manifest: true`): ' +
+    '    (1) This action is for SKILL.md — check content equality FIRST. ' +
+    '    (2) Read local SKILL.md file (if it exists). ' +
+    '    (3) If local content === action.content (string equality), SKIP this action AND ALL SUBSEQUENT write_file actions for this skill (until next skill or different action type). ' +
+    '    (4) If content differs or file missing, PROCEED with this action and all subsequent write_file actions for this skill. ' +
+    '  GENERAL HANDLING (when action has NO `is_skill_manifest` marker): ' +
+    '    (1) Read the existing file at `path` (if it exists) using fs.readFile() or equivalent. ' +
+    '    (2) Compare the file content directly (string equality) against the `content` field. ' +
+    '    (3) SKIP the write if they are EXACTLY equal — the file is already up-to-date. ' +
+    '    (4) Otherwise, create any missing parent directories and write the file. ' +
+    '    (5) If `mode` field is present (e.g. "0755"), set file permissions using fs.chmod() on Unix systems. ' +
     'For merge_mcp_json actions: ' +
     '  (1) If the action has `skip_if_exists: true` AND `mcpServers[server_name]` already exists ' +
     '      in ~/.cursor/mcp.json, SKIP this action entirely — the server is already configured ' +
@@ -795,7 +868,7 @@ export const syncResourcesTool = {
     properties: {
       mode: {
         type: 'string',
-        description: 'Sync mode: check (status only), incremental (updates only), full (all)',
+        description: 'Sync mode: check (status only), incremental (skip unchanged files), full (force all)',
         enum: ['check', 'incremental', 'full'],
         default: 'incremental',
       },

@@ -1,8 +1,17 @@
 # CSP-AI-Agent MCP Server - 核心设计文档
 
-**版本**: v1.7  
-**日期**: 2026-03-23  
+**版本**: v2.0  
+**日期**: 2026-03-27  
 **状态**: OpenSpec Validated ✅
+
+> **📌 v2.0更新** (2026-03-27 - FEAT-2026-03-27-002):
+>
+> - ✅ **混合同步策略 (Hybrid Sync)**: Command/Skill 采用双层架构（MCP Prompt + 本地脚本文件）
+> - ✅ **复杂 Skill 支持**: 含 `scripts/` 目录的 Skill 自动下载到 `~/.cursor/skills/<name>/`，支持本地脚本调用
+> - ✅ **增量更新**: 使用 SHA256 哈希对比，仅下载新增或变化的文件
+> - ✅ **文件权限管理**: 可执行脚本自动设置 mode 755（Unix 系统）
+> - ✅ **卸载增强**: `uninstall_resource` 支持递归删除本地脚本目录
+> - ✅ **向后兼容**: 简单 Skill 行为与 v1.5 一致，无破坏性变更
 
 > **📌 v1.7更新** (2026-03-27):
 >
@@ -496,14 +505,85 @@ promptManager.registerPrompt(meta)
 6. **数据库**: CSP REST API 自己管理数据库，与 MCP Server 无关
 6. **.prompt-cache/**: 存放中间文件，放在 MCP Server CWD，不进 Git 仓库
 
-### 3.3 资源类型分发策略 (v1.5)
+### 3.3 资源类型分发策略 (v2.0 - Hybrid Sync)
 
-| 资源类型 | 下发策略 | 存储位置 | 埋点能力 |
-|---------|---------|---------|---------|
-| **Command** | MCP Prompt 注册（不下发文件） | `.prompt-cache/` (服务端临时) | ✅ 精准统计每次调用 + jira_id |
-| **Skill** | MCP Prompt 注册（不下发文件） | `.prompt-cache/` (服务端临时) | ✅ 精准统计每次调用 + jira_id |
-| **Rule** | 下发到 `~/.cursor/rules/` | 用户本地 | ⚠️ 仅统计已订阅列表 |
-| **MCP** | 配置写入 `~/.cursor/mcp.json` | 用户本地 | ⚠️ 仅统计已配置列表（各 MCP 自行埋点） |
+**混合同步策略（v2.0+ feat-hybrid-skill-sync）：**
+
+从 v2.0 开始，Command/Skill 采用**双层架构**：
+1. **远程层（MCP Prompt）**：所有 Skill/Command 都注册为 MCP Prompt（保证 telemetry 统计）
+2. **本地层（Script Files）**：仅复杂 Skill 下载脚本到本地（支持本地工具调用）
+
+| 资源类型 | MCP Prompt 注册 | 本地文件下载 | 存储位置 | 埋点能力 | 判断标准 |
+|---------|---------------|------------|---------|---------|---------|
+| **简单 Command** | ✅ | ❌ | `.prompt-cache/` (服务端) | ✅ 精准统计每次调用 + jira_id | 单 `.md` 文件 |
+| **简单 Skill** | ✅ | ❌ | `.prompt-cache/` (服务端) | ✅ 精准统计每次调用 + jira_id | 仅 `SKILL.md`，无 `scripts/` |
+| **复杂 Skill** | ✅ | ✅ | `.prompt-cache/` + `~/.cursor/skills/<name>/` | ✅ 精准统计（Prompt） + 本地脚本执行 | `has_scripts=true` |
+| **Rule** | ❌ | ✅ | `~/.cursor/rules/` | ⚠️ 仅统计已订阅列表 | Cursor 引擎需本地文件 |
+| **MCP** | ❌ | ✅ | `~/.cursor/mcp-servers/` + `mcp.json` | ⚠️ 仅统计已配置列表 | Cursor 引擎需本地安装 |
+
+**复杂 Skill 示例（zoom-build）：**
+
+```
+服务端（MCP Server）：
+  .prompt-cache/skill-6dea7a2c8cf83e5d227ee39035411730.md
+  （AI 通过 prompts/get 获取，记录 telemetry）
+
+用户本地（Cursor 机器）：
+  ~/.cursor/skills/zoom-build/
+  ├── SKILL.md
+  ├── scripts/
+  │   ├── build-cli        ← mode 755, 可执行
+  │   ├── build-trigger    ← mode 755
+  │   └── build-poll
+  └── teams/
+      ├── client-android.json
+      └── client-ios.json
+
+调用流程：
+  /skill/zoom-build
+    → MCP Server: prompts/get → 统计 telemetry ✅
+    → AI 获取 SKILL.md：指引调用 ~/.cursor/skills/zoom-build/scripts/build-cli
+    → AI 执行本地脚本：node ~/.cursor/skills/zoom-build/scripts/build-cli ... ✅
+```
+
+**增量同步机制（v2.0）：**
+
+```typescript
+// sync_resources 逻辑
+for (const subscription of subscriptions) {
+  const metadata = await apiClient.getResourceMetadata(subscription.id);
+  
+  if (metadata.has_scripts && metadata.script_files) {
+    for (const file of metadata.script_files) {
+      const localPath = `~/.cursor/skills/${metadata.name}/${file.relative_path}`;
+      const expandedPath = expandPath(localPath);
+      
+      // Hash comparison
+      if (fs.existsSync(expandedPath)) {
+        const localHash = calculateFileHash(expandedPath);
+        const remoteHash = calculateContentHash(file.content);
+        
+        if (localHash === remoteHash) {
+          continue;  // Skip unchanged file
+        }
+      }
+      
+      // Download file
+      localActions.push({
+        action: 'write_file',
+        path: localPath,
+        content: file.content,
+        mode: file.mode,  // e.g. "0755" for executables
+        encoding: file.encoding || 'utf8'
+      });
+    }
+  }
+}
+```
+
+**向后兼容：**
+- 简单 Skill 行为与 v1.5 完全一致（仅 MCP Prompt，无本地文件）
+- 已有订阅在首次 v2.0 sync 时自动下载脚本（透明升级）
 
 ### 3.4 Telemetry 遥测设计
 

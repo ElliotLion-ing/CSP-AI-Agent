@@ -511,6 +511,20 @@ class APIClient {
   }
 
   /**
+   * Get full resource metadata including script files and content hash.
+   * 
+   * This is the primary endpoint for hybrid sync — returns enhanced metadata
+   * with has_scripts, script_files array, and file permissions.
+   * 
+   * Fallback: If the server hasn't implemented this endpoint yet, falls back
+   * to downloadResource() and infers has_scripts from file structure.
+   * 
+   * GET /api/v1/resources/{id}/metadata
+   * Response: { data: { id, name, type, version, content, has_scripts, script_files, content_hash } }
+   * 
+   * @param userToken Per-request token from the caller's mcp.json configuration.
+   */
+  /**
    * Get resource detail
    *
    * @param userToken Per-request token from the caller's mcp.json configuration.

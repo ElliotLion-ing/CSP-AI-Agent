@@ -435,6 +435,7 @@ class MultiSourceGitManager {
   async readResourceFiles(
     resourceName: string,
     resourceType: 'command' | 'skill' | 'rule' | 'mcp',
+    includeAllFiles: boolean = false,
   ): Promise<Array<{ path: string; content: string }>> {
     let sources: SourceConfig[];
     try {
@@ -499,33 +500,55 @@ class MultiSourceGitManager {
       try {
         const stat = await fs.stat(resourceDir);
         if (stat.isDirectory()) {
-          const entries = await fs.readdir(resourceDir);
-          // For mcp resources also include mcp-config.json (which is the key
-          // config file and may be the only file present in the directory).
-          const relevantFiles = entries.filter(
-            (f) => f.endsWith('.md') || f.endsWith('.mdc') ||
-              (resourceType === 'mcp' && f === 'mcp-config.json'),
-          );
-          if (relevantFiles.length > 0) {
-            const results: Array<{ path: string; content: string }> = [];
-            for (const f of relevantFiles) {
-              const filePath = path.join(resourceDir, f);
-              const content = await fs.readFile(filePath, 'utf-8');
-              results.push({ path: f, content });
+          const results: Array<{ path: string; content: string }> = [];
+          
+          if (includeAllFiles) {
+            // Recursively read ALL files in the directory
+            await this.readDirectoryRecursive(resourceDir, '', results);
+            
+            if (results.length > 0) {
+              logger.info(
+                {
+                  source: source.name,
+                  resourceName,
+                  resourceType,
+                  dirPath: resourceDir,
+                  fileCount: results.length,
+                  files: results.map((r) => r.path),
+                },
+                'readResourceFiles: found all files in directory (recursive)',
+              );
+              return results;
             }
-            logger.info(
-              {
-                source: source.name,
-                resourceName,
-                resourceType,
-                dirPath: resourceDir,
-                fileCount: results.length,
-                files: results.map((r) => r.path),
-              },
-              'readResourceFiles: found files in directory layout',
+          } else {
+            // Legacy behavior: only markdown and mcp-config.json
+            const entries = await fs.readdir(resourceDir);
+            const relevantFiles = entries.filter(
+              (f) => f.endsWith('.md') || f.endsWith('.mdc') ||
+                (resourceType === 'mcp' && f === 'mcp-config.json'),
             );
-            return results;
+            
+            if (relevantFiles.length > 0) {
+              for (const f of relevantFiles) {
+                const filePath = path.join(resourceDir, f);
+                const content = await fs.readFile(filePath, 'utf-8');
+                results.push({ path: f, content });
+              }
+              logger.info(
+                {
+                  source: source.name,
+                  resourceName,
+                  resourceType,
+                  dirPath: resourceDir,
+                  fileCount: results.length,
+                  files: results.map((r) => r.path),
+                },
+                'readResourceFiles: found files in directory layout',
+              );
+              return results;
+            }
           }
+          
           logger.info(
             { source: source.name, resourceName, resourceType, dirPath: resourceDir },
             'readResourceFiles: directory exists but contains no relevant files — trying flat file',
@@ -565,6 +588,131 @@ class MultiSourceGitManager {
       'readResourceFiles: resource not found in any git source',
     );
     return [];
+  }
+
+  /**
+   * Recursively read all files in a directory, returning relative paths and content.
+   * 
+   * @param dirPath - Absolute path to the directory
+   * @param relativePath - Relative path prefix (for recursion)
+   * @param results - Accumulator array
+   */
+  private async readDirectoryRecursive(
+    dirPath: string,
+    relativePath: string,
+    results: Array<{ path: string; content: string }>
+  ): Promise<void> {
+    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      // Skip hidden files and directories (., .., .git, .DS_Store)
+      if (entry.name.startsWith('.')) continue;
+
+      const fullPath = path.join(dirPath, entry.name);
+      const relPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+
+      if (entry.isDirectory()) {
+        await this.readDirectoryRecursive(fullPath, relPath, results);
+      } else if (entry.isFile()) {
+        try {
+          const content = await fs.readFile(fullPath, 'utf-8');
+          results.push({ path: relPath, content });
+        } catch (readErr) {
+          logger.warn(
+            { fullPath, relPath, error: (readErr as Error).message },
+            'readResourceFiles: failed to read file, skipping'
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Scan resource directory and generate metadata (has_scripts, script_files).
+   * 
+   * This method enables client-side metadata generation without requiring
+   * server-side API support. It inspects the local Git working directory.
+   * 
+   * @param resourceName - Resource name
+   * @param resourceType - Resource type
+   * @returns Metadata object with has_scripts and script_files
+   */
+  async scanResourceMetadata(
+    resourceName: string,
+    resourceType: 'command' | 'skill' | 'rule' | 'mcp'
+  ): Promise<{
+    has_scripts: boolean;
+    script_files?: Array<{
+      relative_path: string;
+      content: string;
+      mode?: string;
+      encoding: 'utf8' | 'base64';
+    }>;
+  }> {
+    logger.info(
+      { resourceName, resourceType },
+      'scanResourceMetadata: scanning local Git directory for resource metadata'
+    );
+
+    const allFiles = await this.readResourceFiles(resourceName, resourceType, true);
+
+    if (allFiles.length === 0) {
+      logger.warn({ resourceName, resourceType }, 'scanResourceMetadata: no files found');
+      return { has_scripts: false };
+    }
+
+    // Detect scripts: any file in scripts/, teams/, references/ directories
+    const hasScripts = allFiles.some(f =>
+      f.path.startsWith('scripts/') ||
+      f.path.startsWith('teams/') ||
+      f.path.startsWith('references/')
+    );
+
+    if (!hasScripts) {
+      logger.info(
+        { resourceName, resourceType, fileCount: allFiles.length },
+        'scanResourceMetadata: no scripts detected (simple resource)'
+      );
+      return { has_scripts: false };
+    }
+
+    // Build script_files array (exclude primary markdown files)
+    const scriptFiles = allFiles
+      .filter(f => 
+        f.path !== 'SKILL.md' && 
+        f.path !== 'COMMAND.md' && 
+        f.path !== 'README.md'
+      )
+      .map(f => {
+        // Infer file mode from path and extension
+        const isScript = f.path.includes('scripts/') && 
+                        !f.path.endsWith('.json') && 
+                        !f.path.endsWith('.md') &&
+                        !f.path.endsWith('.txt');
+
+        return {
+          relative_path: f.path,
+          content: f.content,
+          mode: isScript ? '0755' : '0644',
+          encoding: 'utf8' as const,
+        };
+      });
+
+    logger.info(
+      {
+        resourceName,
+        resourceType,
+        has_scripts: true,
+        scriptFileCount: scriptFiles.length,
+        scriptFiles: scriptFiles.map(f => ({ path: f.relative_path, mode: f.mode })),
+      },
+      'scanResourceMetadata: complex resource detected with scripts'
+    );
+
+    return {
+      has_scripts: true,
+      script_files: scriptFiles,
+    };
   }
 
   /**

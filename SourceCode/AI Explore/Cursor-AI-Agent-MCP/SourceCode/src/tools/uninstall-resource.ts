@@ -25,6 +25,7 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
     const removeFromAccount = typedParams.remove_from_account || false;
 
     const removedResources: Array<{ id: string; name: string; path: string }> = [];
+    const localActions: LocalAction[] = [];
     let subscriptionRemoved = false;
 
     // ── Command / Skill: unregister MCP Prompt + delete cache ─────────────
@@ -56,11 +57,25 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
         logger.info({ promptName, team, resourceType, resourceName }, 'MCP Prompt unregistered via uninstall');
       }
 
+      // ── HYBRID SYNC: Check for local script files and delete them ───────────
+      // For complex skills that have local scripts downloaded via sync_resources,
+      // we need to clean up the local directory.
+      const skillDir = `${getCursorTypeDirForClient('skill')}/${pattern}`;
+      localActions.push({
+        action: 'delete_file',
+        path: skillDir,
+        recursive: true,
+      });
+      logger.info(
+        { pattern, skillDir },
+        'Queued local skill directory deletion (will be skipped if directory does not exist)'
+      );
+
       // Remove from server subscription if requested
       if (removeFromAccount) {
         for (const r of removedResources) {
           try {
-            await apiClient.unsubscribe(r.id);
+            await apiClient.unsubscribe(r.id, typedParams.user_token);
             subscriptionRemoved = true;
           } catch (err) {
             logger.warn({ resourceId: r.id, err }, 'Failed to unsubscribe Command/Skill Prompt from account');
@@ -68,15 +83,17 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
         }
       }
 
-      // Return early — Command/Skill resources have no local filesystem footprint.
+      // Return with local_actions_required for directory cleanup
       const result: UninstallResourceResult = {
         success: true,
         removed_resources: removedResources,
         subscription_removed: subscriptionRemoved,
         message: [
           `Successfully unregistered ${removedResources.length} MCP Prompt${removedResources.length > 1 ? 's' : ''}.`,
+          'Local skill directory cleanup action queued (execute local_actions_required).',
           subscriptionRemoved ? 'Subscription removed from account.' : null,
         ].filter(Boolean).join(' '),
+        local_actions_required: localActions.length > 0 ? localActions : undefined,
       };
       const duration = Date.now() - startTime;
       logToolCall('uninstall_resource', 'user-id', params as Record<string, unknown>, duration);
@@ -89,7 +106,6 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
     // Agent performs them on the user's LOCAL machine.
     logger.debug({ pattern, resourceType: typedParams.resource_type }, 'Building local uninstall actions for Rule/MCP resource...');
 
-    const localActions: LocalAction[] = [];
     // Use client-side tilde-based paths; the MCP server may be running remotely
     // and its os.homedir() would resolve to the server's home, not the user's.
     const mcpJsonPath = `${getCursorRootDirForClient()}/mcp.json`;
@@ -172,14 +188,14 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
 export const uninstallResourceTool = {
   name: 'uninstall_resource',
   description:
-    'Uninstall a Rule or MCP resource from the user\'s local machine. ' +
-    'Returns `local_actions_required` — an ordered list of delete_file and ' +
-    'remove_mcp_json_entry actions that the AI Agent MUST execute on the USER\'S LOCAL MACHINE. ' +
-    'For delete_file actions: delete the file or directory at the given path. ' +
+    'Uninstall a resource from the user\'s local machine. ' +
+    'Command/Skill resources: unregisters MCP Prompt from memory and queues local script directory deletion. ' +
+    'Rule/MCP resources: returns `local_actions_required` with delete_file and remove_mcp_json_entry actions. ' +
+    'For delete_file actions: delete the file or directory at the given path (recursive if flag set). ' +
     'For remove_mcp_json_entry actions: read ~/.cursor/mcp.json, delete the matching ' +
     'mcpServers key, then write the file back. ' +
-    'Command and Skill resources are handled by unregistering their MCP Prompt (no local files). ' +
-    'Set remove_from_account: true to also cancel the server-side subscription.',
+    'Set remove_from_account: true to also cancel the server-side subscription. ' +
+    'The AI Agent MUST execute all local_actions_required on the USER\'S LOCAL MACHINE.',
   inputSchema: {
     type: 'object' as const,
     properties: {

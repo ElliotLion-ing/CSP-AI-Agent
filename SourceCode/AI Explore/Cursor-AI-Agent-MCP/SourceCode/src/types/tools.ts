@@ -20,8 +20,19 @@ export interface WriteFileAction {
   action: 'write_file';
   /** Absolute path on the user's local machine (may start with ~). */
   path: string;
-  /** UTF-8 file content to write. */
+  /** File content to write. */
   content: string;
+  /** File encoding (default: utf8). Set to base64 for binary files. */
+  encoding?: 'utf8' | 'base64';
+  /** File permissions in octal string format (e.g. "0755" for executable, "0644" for regular). Unix only. */
+  mode?: string;
+  /** 
+   * Special marker for SKILL.md files in complex skills.
+   * When true, client should check this file's content FIRST.
+   * If content matches local file exactly (string equality), skip this action AND all subsequent write_file actions until next skill or different action type.
+   * This enables atomic skill-level updates (skip all or download all).
+   */
+  is_skill_manifest?: boolean;
 }
 
 export interface DeleteFileAction {
@@ -143,6 +154,8 @@ export interface SyncResourcesResult {
     total: number;
     synced: number;
     cached: number;
+    /** Number of resources skipped due to no local changes (incremental mode only). */
+    skipped: number;
     failed: number;
   };
   details: Array<{
@@ -150,6 +163,14 @@ export interface SyncResourcesResult {
     name: string;
     action: string;
     version: string;
+  }>;
+  /**
+   * List of resource names that were skipped during incremental sync because
+   * local files are already up-to-date (hash match). Present only when skipped > 0.
+   */
+  skipped_resources?: Array<{
+    name: string;
+    reason: 'already_up_to_date' | 'no_local_sync_needed' | 'mcp_already_configured';
   }>;
   /**
    * MCP servers that were installed/updated but require manual configuration

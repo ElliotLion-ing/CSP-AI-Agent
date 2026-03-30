@@ -9,9 +9,11 @@ CSP AI Agent is an MCP server that enables seamless synchronization of AI resour
 ## Key Features
 
 - **AI Resource Management**: Subscribe, sync, search, and upload AI resources
+- **Hybrid Sync Strategy (v2.0)**: Complex skills download scripts locally while maintaining remote telemetry
 - **Multi-source Git Support**: Aggregate resources from multiple Git repositories with priority-based conflict resolution
+- **Incremental Update**: String content equality comparison to skip unchanged files (reduces bandwidth)
 - **Intelligent Caching**: Skip redundant downloads and file writes using content-based comparison
-- **MCP Prompt Mode**: Commands and Skills are registered as MCP Prompts (no local file writes)
+- **MCP Prompt Mode**: Commands and Skills are registered as MCP Prompts (no local file writes for simple resources)
 - **Solid Prompt Fallback**: Newly subscribed Commands and Skills can be resolved immediately through `resolve_prompt_content`
 - **Auto-configuration**: MCP servers are automatically registered in `~/.cursor/mcp.json`
 - **Telemetry & Analytics**: Track resource usage and sync health
@@ -72,23 +74,57 @@ csp-ai-agent-mcp --transport stdio
 
 #### 1. `sync_resources`
 
-Synchronize subscribed AI resources.
+Synchronize subscribed AI resources with hybrid sync strategy (v2.0).
+
+**Hybrid Sync Strategy:**
+- **Simple resources** (single markdown file): Registered as MCP Prompt only
+- **Complex skills** (with scripts): MCP Prompt + local script files in `~/.cursor/skills/<name>/`
+- **Incremental mode**: Skips unchanged files using string content equality comparison (client-side)
 
 ```typescript
 // In Cursor AI Agent context
 const mcpJson = JSON.parse(fs.readFileSync('~/.cursor/mcp.json', 'utf8'));
 const configured = Object.keys(mcpJson.mcpServers || {});
 
-await callMcpTool('sync_resources', {
+const result = await callMcpTool('sync_resources', {
   mode: 'incremental',  // or 'full', 'check'
   configured_mcp_servers: configured,  // Optimization: skip already configured MCPs
 });
+
+// Execute local actions (for complex skills, rules, and MCPs)
+if (result.local_actions_required) {
+  for (const action of result.local_actions_required) {
+    if (action.action === 'write_file') {
+      const localPath = expandPath(action.path);
+      
+      // Skip if content unchanged
+      if (fs.existsSync(localPath)) {
+        const local = fs.readFileSync(localPath, 'utf8');
+        if (local === action.content) continue;
+      }
+      
+      // Write file
+      fs.mkdirSync(path.dirname(localPath), { recursive: true });
+      fs.writeFileSync(localPath, action.content, action.encoding || 'utf8');
+      
+      // Set permissions (Unix only)
+      if (action.mode && process.platform !== 'win32') {
+        fs.chmodSync(localPath, parseInt(action.mode, 8));
+      }
+    }
+  }
+}
 ```
 
 **Modes:**
-- `incremental` (default): Update only changed resources
+- `incremental` (default): Update only changed resources, skip unchanged files
 - `full`: Download all resources (file recovery mode)
 - `check`: Status check only (no downloads)
+
+**Result Fields:**
+- `summary.skipped`: Number of resources skipped (already up-to-date)
+- `skipped_resources`: Details of skipped resources with reasons
+- `local_actions_required`: File operations for AI to execute locally
 
 **Optimization:** Pass `configured_mcp_servers` to skip downloading MCP resources that are already in `~/.cursor/mcp.json`. This can save **70-90% of API calls and network traffic** in typical scenarios.
 
@@ -145,14 +181,36 @@ await callMcpTool('upload_resource', {
 
 #### 5. `uninstall_resource`
 
-Remove a resource from local installation.
+Remove a resource from local installation (v2.0: includes local script cleanup).
 
 ```typescript
-await callMcpTool('uninstall_resource', {
-  resource_id_or_name: 'my-skill',
-  remove_from_account: false,  // Keep subscription, only remove local files
+// Uninstall a skill with local scripts
+const result = await callMcpTool('uninstall_resource', {
+  resource_id_or_name: 'zoom-build',
+  remove_from_account: true,  // Also cancel subscription
 });
+
+// Execute local cleanup (AI must perform on user's machine)
+if (result.local_actions_required) {
+  for (const action of result.local_actions_required) {
+    if (action.action === 'delete_file') {
+      const localPath = expandPath(action.path);
+      if (fs.existsSync(localPath)) {
+        fs.rmSync(localPath, { 
+          recursive: action.recursive || false, 
+          force: true 
+        });
+        console.log(`Deleted: ${action.path}`);
+      }
+    }
+  }
+}
 ```
+
+**Behavior:**
+- **Command/Skill**: Unregisters MCP Prompt + queues local directory deletion (`~/.cursor/skills/<name>/`)
+- **Rule/MCP**: Returns `local_actions_required` for file/config removal
+- **`remove_from_account: true`**: Also cancels server-side subscription (otherwise will re-sync on next sync)
 
 #### 6. `track_usage`
 
@@ -262,21 +320,117 @@ The server reads `AI-Resources/ai-resources-config.json` to discover available G
 
 ## Architecture
 
-### Resource Delivery Strategy
+### Hybrid Sync Strategy (v2.1 - Client-Side Metadata Scanning)
+
+**Zero Server Dependency!** MCP Server scans local Git repositories to detect complex skills, eliminating the need for server-side metadata API.
+
+**Architecture:**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ MCP Server (user-csp-ai-agent)                              │
+│                                                             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │ Git Working Directory (AI-Resources/)                 │  │
+│  │  ├── csp/ai-resources/skills/zoom-build/              │  │
+│  │  │   ├── SKILL.md                                     │  │
+│  │  │   ├── scripts/build-cli                            │  │
+│  │  │   ├── scripts/build-trigger                        │  │
+│  │  │   └── teams/client-android.json                    │  │
+│  │  └── csp/ai-resources/skills/hang-log-analyzer/       │  │
+│  │      └── SKILL.md                                     │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                         ↓                                   │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │ scanResourceMetadata(resourceName, type)              │  │
+│  │ - Recursively reads all files in directory            │  │
+│  │ - Detects scripts/, teams/, references/ paths         │  │
+│  │ - Infers file permissions (0755 for scripts)          │  │
+│  │ - Returns { has_scripts, script_files[] }             │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                         ↓                                   │
+│  ┌─────────────┐          ┌────────────────────────────┐   │
+│  │ MCP Prompt  │          │ Local Script Files         │   │
+│  │ Registration│  +       │ (for complex skills only)  │   │
+│  │ (Telemetry) │          │ → local_actions_required[] │   │
+│  └─────────────┘          └────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Two-Layer Resource Delivery:**
+
+1. **Remote Layer (MCP Prompt)** - For telemetry tracking
+   - All Skills/Commands registered as MCP Prompts
+   - AI invokes via `/skill/name` → MCP Server records usage
+   - Returns `SKILL.md` content to AI
+
+2. **Local Layer (Script Files)** - For complex skills only
+   - Skills with `has_scripts=true` download to `~/.cursor/skills/<name>/`
+   - Includes executable scripts, configuration files, and references
+   - AI can execute local scripts referenced in `SKILL.md`
+
+**Resource Classification:**
+
+```
+┌─────────────────┬──────────────────┬─────────────────────┬────────────────┐
+│ Resource Type   │ MCP Prompt       │ Local Files         │ Decision       │
+├─────────────────┼──────────────────┼─────────────────────┼────────────────┤
+│ Simple Command  │ ✅ Registered     │ ❌ Not downloaded    │ Single .md     │
+│ Simple Skill    │ ✅ Registered     │ ❌ Not downloaded    │ Only SKILL.md  │
+│ Complex Skill   │ ✅ Registered     │ ✅ Downloaded        │ has_scripts=T  │
+│ Rule            │ ❌ Not applicable │ ✅ Downloaded        │ Engine needs   │
+│ MCP             │ ❌ Not applicable │ ✅ Downloaded        │ Engine needs   │
+└─────────────────┴──────────────────┴─────────────────────┴────────────────┘
+```
+
+**Example: Complex Skill (zoom-build)**
+
+```
+Server-side (MCP Server):
+  .prompt-cache/skill-6dea7a2c8cf83e5d227ee39035411730.md
+  (AI fetches via prompts/get, telemetry recorded)
+
+User-side (Cursor machine):
+  ~/.cursor/skills/zoom-build/
+  ├── SKILL.md
+  ├── scripts/
+  │   ├── build-cli        ← mode 755 (executable)
+  │   ├── build-trigger    ← mode 755
+  │   └── build-poll
+  └── teams/
+      ├── client-android.json
+      └── client-ios.json
+
+Invocation flow:
+  /skill/zoom-build
+    → MCP Server: prompts/get → tracks telemetry ✅
+    → AI gets SKILL.md: "Run ~/.cursor/skills/zoom-build/scripts/build-cli"
+    → AI executes local script ✅
+    → Script returns build URL
+```
+
+### Resource Delivery Strategy (Legacy Reference)
+
+**Previous Versions:**
+- v1.0-1.4: All resources downloaded to local files
+- v1.5-1.7: Pure MCP Prompt mode (telemetry enabled, but complex skills broken)
+- v2.0+: Hybrid approach (best of both worlds)
 
 ```
 ┌─────────────────┬──────────────────┬─────────────────────┐
 │ Resource Type   │ Storage          │ Delivery Method     │
 ├─────────────────┼──────────────────┼─────────────────────┤
 │ Command         │ MCP Prompt       │ In-memory cache     │
-│ Skill           │ MCP Prompt       │ In-memory cache     │
+│ Skill (simple)  │ MCP Prompt       │ In-memory cache     │
+│ Skill (complex) │ MCP Prompt +     │ Cache + local files │
+│                 │ Local scripts    │                     │
 │ Rule            │ ~/.cursor/rules/ │ write_file action   │
 │ MCP (local)     │ ~/.cursor/mcp-*/ │ write_file actions  │
 │ MCP (remote)    │ ~/.cursor/mcp.*  │ merge_mcp_json only │
 └─────────────────┴──────────────────┴─────────────────────┘
 ```
 
-### Sync Flow
+### Sync Flow (v2.0 Hybrid)
 
 ```
 User: "csp 同步资源"
@@ -287,32 +441,166 @@ AI Agent: Call sync_resources(mode: 'incremental', configured_mcp_servers: [...]
      ↓
 MCP Server:
   1. Fetch subscription list from CSP API
-  2. For each subscription:
-     - Skip if MCP already in configured_mcp_servers (optimization)
-     - Download resource files (API or Git fallback)
-     - Generate local_actions_required
-  3. Return result + actions
+  2. Git pull resource repositories
+  3. For each subscription:
+     a. Register MCP Prompt (all Skills/Commands)
+     b. Scan local Git via scanResourceMetadata() (not API call)
+     c. If has_scripts=true:
+        - Generate write_file actions for ALL script files
+        - Set mode="0755" for executables
+     d. Track skipped resources
+  4. Return result + local_actions_required
      ↓
-AI Agent: Execute local_actions_required
-  - write_file: Compare content, skip if identical
-  - merge_mcp_json: Check skip_if_exists, preserve user env
+AI Agent (Cursor): Execute local_actions_required
+  - write_file: 
+      1. Read existing file (if exists)
+      2. Check content equality (localContent === action.content)
+      3. SKIP write if identical (already up-to-date)
+      4. Write file + create parent dirs
+      5. Set permissions (chmod on Unix)
+  - merge_mcp_json: Smart merge preserving user env
      ↓
 User: Resources synced ✅
+  - Summary: synced=5, skipped=3 (already up-to-date)
+  - Complex skills now have local scripts available
 ```
 
 ## Performance Optimizations
 
-### 1. Content-based File Comparison (v0.1.23)
+### 1. Client-Side Metadata Scanning (v2.1 - 2026-03-27)
 
-**Before:** Used SHA-256 hash comparison (error-prone, platform-dependent)  
-**After:** Direct string equality check (`existing === action.content`)
+**Breakthrough:** Eliminated dependency on server-side metadata API by scanning local Git repositories.
+
+**Architecture:**
+
+```
+Before (v2.0):
+  sync_resources → REST API /resources/{id}/metadata → has_scripts + script_files
+                     ↑ (requires server team coordination)
+
+After (v2.1):
+  sync_resources → multiSourceGitManager.scanResourceMetadata() → has_scripts + script_files
+                     ↑ (scans AI-Resources/ local filesystem)
+```
+
+**Implementation:**
+
+```typescript
+// New method in multi-source-manager.ts
+const metadata = await multiSourceGitManager.scanResourceMetadata(
+  'zoom-build',
+  'skill'
+);
+// Returns:
+// {
+//   has_scripts: true,
+//   script_files: [
+//     { relative_path: 'scripts/build-cli', content: '...', mode: '0755' },
+//     { relative_path: 'teams/client-android.json', content: '...', mode: '0644' }
+//   ]
+// }
+```
 
 **Benefits:**
-- ✅ Infinitely faster (0ms vs 6ms per file)
-- ✅ 100% reliable (no platform issues)
-- ✅ Simpler implementation (6 lines vs 15+ lines)
+- ✅ Zero server-side code changes needed
+- ✅ No REST API dependency
+- ✅ Real-time Git repository reflection
+- ✅ Instant deployment (no backend coordination)
+- ✅ Local filesystem speed (< 50ms for typical skill)
 
-### 2. MCP Skip Optimization (v0.1.23)
+### 2. Incremental Sync with SKILL.md Content Check (v2.1.1)
+
+**Problem:** Re-downloading unchanged multi-file skills wastes bandwidth and time.
+
+**Solution:** Skill-level content comparison (SKILL.md only).
+
+```typescript
+// Client-side logic when executing write_file actions
+for (const action of local_actions_required) {
+  if (action.action === 'write_file') {
+    const localPath = expandPath(action.path);
+    
+    // For SKILL.md: compare content to decide whether to skip entire skill
+    if (action.path.endsWith('SKILL.md')) {
+      const existingContent = fs.existsSync(localPath) 
+        ? fs.readFileSync(localPath, 'utf8') 
+        : null;
+      
+      if (existingContent === action.content) {
+        // SKILL.md unchanged → skip entire skill
+        skipSkill(skillName);
+        continue;
+      }
+    }
+    
+    // SKILL.md changed → re-download all script files
+    writeFile(localPath, action.content, action.mode);
+  }
+}
+```
+
+**Why SKILL.md-only?**
+- ✅ Atomic update: either skip all or download all
+- ✅ Detects file additions/deletions (version bump in SKILL.md)
+- ✅ Simpler logic (single content check vs multiple file I/O)
+- ✅ SKILL.md is the version manifest (any script change should update version)
+
+**Benefits:**
+- ✅ 67% less I/O for unchanged skills (1 file read vs 3+)
+- ✅ Prevents orphaned files (no partial updates)
+- ✅ Guarantees consistency (all-or-nothing sync)
+
+**Metrics (zoom-build skill, 3 files, 50KB):**
+- First sync: 50KB downloaded, ~200ms
+- Second sync (SKILL.md unchanged): 0 bytes downloaded, ~50ms ✅
+- Third sync (SKILL.md changed): 50KB downloaded, ~200ms (re-downloads all)
+
+### 3. Content-based File Comparison (v2.2.0)
+
+**Before:** Used SHA-256 hash calculation (introduced extra CPU overhead)  
+**After:** Direct string equality check (`existingContent === action.content`)
+
+**Benefits:**
+- ✅ Zero hash calculation overhead (no `crypto` calls)
+- ✅ 100% reliable (string equality is unambiguous)
+- ✅ Simpler implementation (removed `file-hash.ts` utility)
+- ✅ Client-side execution (no MCP Server filesystem access)
+
+### 4. Cross-Resource Invocation Guidance (v2.3.0)
+
+**Problem:** When a Command/Skill/Rule references another independent resource, AI Agent might read local files directly, bypassing telemetry tracking.
+
+**Solution:** Auto-inject guidance prefix when returning content via `resolve_prompt_content`.
+
+**Implementation:**
+```typescript
+// PromptManager.resolvePromptContentForInvocation()
+const guidancePrefix = buildCrossResourceGuidance(resourceType);
+return {
+  content: guidancePrefix + strippedContent
+};
+```
+
+**Example returned content:**
+```markdown
+<!-- CROSS-RESOURCE INVOCATION GUIDANCE (auto-generated by MCP Server) -->
+> **Important**: If this command references OTHER independent Commands or Skills:
+>   - ALWAYS invoke them via resolve_prompt_content
+>   - NEVER read local files directly for cross-resource calls
+>   - This ensures every independent resource invocation is tracked in telemetry.
+> ...
+<!-- END GUIDANCE -->
+
+[Actual Command/Skill content]
+```
+
+**Benefits:**
+- ✅ Transparent to resource creators (no need to modify Command/Skill content)
+- ✅ Clear guidance for AI Agent (no guessing required)
+- ✅ Accurate telemetry (cross-resource calls always go through MCP Server)
+- ✅ Distinguishes cross-resource calls vs internal skill tools
+
+### 5. MCP Skip Optimization (v0.1.23)
 
 **Before:** Always downloaded all MCP resources, generated all write_file actions  
 **After:** Skip downloading MCPs that are already in `configured_mcp_servers`
@@ -449,17 +737,29 @@ GET /sse
 
 ## Version History
 
+### v0.1.24 (2026-03-27)
+
+**New Features:**
+- Added cross-resource invocation guidance mechanism in `resolve_prompt_content`
+- Auto-inject guidance prefix to instruct AI Agent how to handle references to other Commands/Skills
+- Clear distinction between cross-resource calls (use `resolve_prompt_content`) vs internal skill tools (use local files)
+
+**Code Quality:**
+- Added `is_skill_manifest` marker to `WriteFileAction` for atomic skill-level updates
+- Enhanced `PromptManager.buildCrossResourceGuidance()` to generate resource-specific guidance
+- Improved telemetry accuracy by ensuring cross-resource calls always go through MCP Server
+
 ### v0.1.23 (2026-03-27)
 
 **Performance Optimizations:**
-- Removed hash-based file comparison, use direct content equality
+- Removed hash-based file comparison, use direct string content equality check
 - Added `configured_mcp_servers` parameter to skip downloading already-configured MCPs
 - Typical sync time reduced by 80-85% (8-12s → 1-2s)
-- Removed `crypto` dependency from sync operations
+- Removed `crypto` dependency and `file-hash.ts` utility from sync operations
 
 **Bug Fixes:**
-- Fixed hash calculation mismatch between MCP Server and AI Agent (BUG-2026-03-27-001)
-- Eliminated platform-dependent `cat | sha256sum` issues
+- Fixed content comparison logic to use string equality (eliminates platform-dependent issues)
+- Eliminated hash calculation overhead (BUG-2026-03-27-001)
 
 ### v0.1.22 and earlier
 

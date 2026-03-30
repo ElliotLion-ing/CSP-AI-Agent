@@ -1,0 +1,40 @@
+{
+  "client_version": "0.1.5",
+  "users": {
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJDU1BfTUNQX0FVVEgiLCJpc3MiOiJjbGllbnQtc2VydmljZS1wbGF0Zm9ybSIsImlhdCI6MTc3MjA3NjIxNSwiZW1haWwiOiJlbGxpb3QuZGluZ0B6b29tLnVzIn0.xw7Np0MynXqhL4ay_vN1v5Ac332aga0tgybPQsC7WMc": {
+      "last_reported_at": "2026-03-27T05:44:49.394Z",
+      "pending_events": [],
+      "subscribed_rules": [],
+      "configured_mcps": [
+        {
+          "resource_id": "mcp-client-sdk-ai-hub-jenkins",
+          "resource_name": "jenkins",
+          "configured_at": "2026-03-01T00:00:00Z"
+        },
+        {
+          "resource_id": "mcp-csp-acm",
+          "resource_name": "acm",
+          "configured_at": "2026-03-01T00:00:00Z"
+        }
+      ]
+    },
+    "undefined": {
+      "last_reported_at": null,
+      "pending_events": [],
+      "subscribed_rules": [],
+      "configured_mcps": []
+    },
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJDU1BfTUNQX0FVVEgiLCJpc3MiOiJjbGllbnQtc2VydmljZS1wbGF0Zm9ybSIsImlhdCI6MTc3NDQwMzQwOSwiZW1haWwiOiJlbGxpb3QuZGluZ0B6b29tLnVzIn0.0vNcEhEkUWuIWMF-Bf6AVendKEPTtfMDyUYpY7jFAvo": {
+      "last_reported_at": null,
+      "pending_events": [],
+      "subscribed_rules": [],
+      "configured_mcps": []
+    },
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJDU1BfTUNQX0FVVEgiLCJpc3MiOiJjbGllbnQtc2VydmljZS1wbGF0Zm9ybSIsImlhdCI6MTc3NDQwNzgxMCwiZW1haWwiOiJlbGxpb3QuZGluZ0B6b29tLnVzIn0.fAeDQv8Q39lPTn9H5I5qNDMaQ8k2eadTKeExiKBSizI": {
+      "last_reported_at": null,
+      "pending_events": [],
+      "subscribed_rules": [],
+      "configured_mcps": []
+    }
+  }
+}

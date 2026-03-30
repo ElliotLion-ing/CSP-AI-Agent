@@ -1,12 +1,20 @@
 # CSP-AI-Agent MCP Server - 整体设计方案
 
-**版本**: v1.5  
-**日期**: 2026-03-09  
+**版本**: v2.0  
+**日期**: 2026-03-27  
 **状态**: OpenSpec Validated ✅  
 **补充文档**: 
 - [API映射补充文档](./CSP-AI-Agent-API-Mapping.md) ⭐️
 - [多线程架构文档](./CSP-AI-Agent-MultiThread-Architecture.md) ⭐️
 - [日志记录模块设计](./CSP-AI-Agent-Logging-Design.md) 🆕
+
+> **📌 v2.0更新** (2026-03-27 - FEAT-2026-03-27-002): 
+> - ✅ **混合同步策略 (Hybrid Sync)**: Command/Skill 采用双层架构（MCP Prompt + 本地脚本文件）
+> - ✅ **复杂 Skill 支持**: 含 `scripts/` 目录的 Skill 自动下载到 `~/.cursor/skills/<name>/`
+> - ✅ **增量更新**: SHA256 哈希对比，仅下载变化文件，避免重复下载
+> - ✅ **文件权限管理**: 可执行脚本自动设置 mode 755
+> - ✅ **卸载增强**: 递归删除本地脚本目录
+> - ✅ **新增工具模块**: `utils/file-hash.ts` (SHA256), `utils/file-permissions.ts` (chmod)
 
 > **📌 v1.5更新** (2026-03-09): 
 > - ✅ 新增日志记录模块设计，详见 [日志记录模块设计文档](./CSP-AI-Agent-Logging-Design.md)
@@ -296,81 +304,117 @@ Cursor IDE（开发环境）
 
 | Tool | 功能 | 关键参数 |
 |------|------|---------|
-| **sync_resources** | 同步并加载资源 | mode, scope, types |
+| **sync_resources** | 同步并加载资源（混合策略） | mode, scope, types, configured_mcp_servers |
 | **manage_subscription** | 订阅管理 | action, resource_ids, auto_sync(默认true), scope(默认global), notify(默认true) |
 | **search_resources** | 资源搜索 | team, type, keyword |
 | **upload_resource** | 上传资源 | resource_id, type, message, team(默认Client-Public) |
-| **uninstall_resource** | 卸载资源 | resource_id_or_name, remove_from_account(默认false) |
+| **uninstall_resource** | 卸载资源（含本地清理） | resource_id_or_name, remove_from_account(默认false) |
 | **track_usage** | 遥测埋点（自动触发） | resource_id, resource_type, resource_name, user_token, jira_id(可选) |
 
-### 3.2 下载流程（sync_resources - 增强缓存机制）
+**v2.0 混合同步策略重点变更：**
+- `sync_resources`: 新增增量哈希对比（`summary.skipped` 字段、`skipped_resources` 数组）
+- `sync_resources`: 复杂 Skill 生成 `local_actions_required` 含 `mode` 和 `encoding` 字段
+- `uninstall_resource`: Command/Skill 卸载时增加本地目录删除（`~/.cursor/skills/<name>/`）
+
+### 3.2 下载流程（sync_resources - 混合同步 + 增量更新）
+
+**v2.0 混合同步架构：**
 
 ```
 用户调用 sync_resources(mode="incremental", scope="global")
    ↓
-【步骤1: 读取本地状态】
-   读取 ~/.cursor/.csp-sync-state.json
-   获取已缓存资源的元数据:
-   - resource_id
-   - version
-   - hash (sha256)
-   - last_synced_at
-   - last_verified_at
-   - sync_status (synced/failed/verifying)
+【步骤1: 获取订阅列表】
+   MCP Server → GET /csp/api/resources/subscriptions?detail=true
+   响应: subscriptions[] 数组（含 id, name, type, version）
    ↓
-【步骤2: 获取订阅资源清单（带缓存头）】
-   MCP Server → GET /csp/api/resources/subscriptions
-   Headers:
-     - If-None-Match: "{本地清单的ETag}"
-     - Authorization: Bearer token
-   
-   响应:
-   - 304 Not Modified → 跳过下载,使用本地缓存
-   - 200 OK → 继续处理资源清单
+【步骤2: 服务端 Git 同步】
+   multiSourceGitManager.syncAllSources()
+   ├─ 克隆/拉取远程资源仓库（CSP、Client-SDK-AI-Hub 等）
+   └─ 读取本地 Git 工作区文件（fallback to download API）
    ↓
-【步骤3: 智能差异对比】
-   对比本地状态 vs 服务端资源清单:
+【步骤3: 资源分类处理】
+   For each subscription in subscriptions[]:
    
-   For each resource in subscriptions:
-     ├─ 本地不存在? → 标记为"需下载"
-     ├─ version不同? → 标记为"需更新"
-     ├─ hash不同? → 标记为"需重新验证"
-     └─ 完全一致? → 标记为"跳过"(使用缓存)
-   ↓
-【步骤4: 带缓存验证的下载】
-   For each 标记为"需下载/需更新"的资源:
+   ┌─────────────────────────────────────────────────────┐
+   │ Command / Skill (双层架构)                            │
+   └─────────────────────────────────────────────────────┘
    
-     HTTP GET /csp/api/resources/download/{id}
-     Headers:
-       - If-None-Match: "{本地文件的hash}"
-     
-     响应处理:
-       ├─ 304 Not Modified
-       │    → 本地缓存有效,标记sync_status="cached"
-       │    → 更新last_verified_at
+   3.1 【远程层】注册 MCP Prompt（所有 Skill/Command）
+       ├─ downloadResource(id) 或从 Git 读取
+       ├─ 提取 SKILL.md 或 COMMAND.md 内容
+       ├─ 展开 import 指令 + 替换 ${VAR}
+       ├─ 写入 .prompt-cache/{type}-{id}.md
+       └─ promptManager.registerPrompt() → Cursor slash 菜单可见
+   
+   3.2 【本地层】下载脚本文件（仅复杂 Skill）
+       ├─ 调用 apiClient.getResourceMetadata(id)
+       │   └─ Fallback: 推断 has_scripts（检测 files[] 含 scripts/）
        │
-       └─ 200 OK  (JSON: { data: { files: [{path, content}] } })
-            → 遍历 files[] 数组
-            → 校验每个 file.path 不含 ../ (防路径穿越)
-            → 按 file.path 写入 ~/.cursor/<type>/<name>/<file.path>
-              ├─ skill/mcp  → ~/.cursor/skills/<name>/<path>
-              ├─ command    → ~/.cursor/commands/<name>.md
-              └─ rule       → ~/.cursor/rules/<name>.mdc
-            → 更新sync状态
+       ├─ 若 has_scripts=false → 跳过本地下载
+       │
+       └─ 若 has_scripts=true && script_files[] 存在:
+           ├─ For each script_file in script_files[]:
+           │   ├─ 本地路径: ~/.cursor/skills/<name>/<relative_path>
+           │   │
+           │   ├─ ⚡ 增量检查（mode=incremental 时）:
+           │   │   ├─ 本地文件不存在 → 下载
+           │   │   ├─ 本地文件存在:
+           │   │   │   ├─ 计算 SHA256(本地内容)
+           │   │   │   ├─ 计算 SHA256(远程内容)
+           │   │   │   ├─ 哈希相同 → 跳过下载 ✅
+           │   │   │   └─ 哈希不同 → 下载更新
+           │   │   └─ mode=full 时强制下载
+           │   │
+           │   └─ 生成 write_file action:
+           │       {
+           │         action: 'write_file',
+           │         path: '~/.cursor/skills/zoom-build/scripts/build-cli',
+           │         content: '#!/usr/bin/env node\n...',
+           │         mode: '0755',       ← 可执行权限
+           │         encoding: 'utf8'
+           │       }
+           │
+           └─ 所有文件检查完成后:
+               ├─ 有需要下载的文件 → summary.synced++
+               └─ 全部跳过 → summary.skipped++, 记入 skipped_resources[]
+   
+   ┌─────────────────────────────────────────────────────┐
+   │ Rule / MCP (本地文件模式，保持不变)                      │
+   └─────────────────────────────────────────────────────┘
+   
+   3.3 生成 local_actions_required:
+       Rule  → write_file: ~/.cursor/rules/<name>.mdc
+       MCP   → write_file: ~/.cursor/mcp-servers/<name>/... 
+             + merge_mcp_json: 更新 ~/.cursor/mcp.json
    ↓
-【步骤5: 失败重试机制】
-   For each 下载失败的资源:
-     - retry_count < 3 → 指数退避重试(1s, 2s, 4s)
-     - retry_count >= 3 → 标记为"failed", 记录错误信息
-   ↓
-【步骤6: 更新本地状态文件】
-   更新 ~/.cursor/.csp-sync-state.json:
+【步骤4: 返回结果】
    {
-     "version": "1.0.0",
-     "last_sync_at": "2026-03-03T10:00:00Z",
-     "manifest_etag": "W/\"abc123\"",
-     "manifest_modified": "2026-03-03T09:55:00Z",
-     "resources": [
+     summary: { total, synced, cached, skipped, failed },
+     skipped_resources: [{ name, reason: 'already_up_to_date' }],
+     local_actions_required: [...]
+   }
+   ↓
+【步骤5: AI 执行本地操作】
+   For each action in local_actions_required:
+   
+   write_file:
+     ├─ 再次验证内容是否已最新（string equality）
+     ├─ 不同时写入文件（mkdir -p parent dir）
+     └─ 设置权限（chmod on Unix）
+   
+   delete_file:
+     └─ fs.rmSync(path, { recursive: true })
+   
+   merge_mcp_json:
+     ├─ skip_if_exists=true 且 key 已存在 → 跳过
+     └─ 否则：smart merge + 写回文件
+```
+
+**关键改进（v2.0）：**
+1. ✅ **双重验证避免重复下载**：服务端哈希对比 + AI 本地内容对比
+2. ✅ **权限保留**：可执行脚本下载后保持 755 权限
+3. ✅ **部分更新**：仅下载变化的文件，其他文件不覆盖
+4. ✅ **跳过统计**：新增 `skipped` 计数和 `skipped_resources` 详情
        {
          "id": "codereview-command-001",
          "name": "debug-network",
