@@ -852,6 +852,18 @@ export const syncResourcesTool = {
     'This ensures telemetry tracking by forcing resolve_prompt_content as entry point. ' +
     'If the user subscribed to a NEW Command or Skill in THIS conversation and you need to execute it immediately, do NOT wait for native prompts/get. ' +
     'After this tool completes, call `resolve_prompt_content` with the new prompt_name or resource_id, then execute the returned content. ' +
+    '\n\n' +
+    '⚠️ CRITICAL: HANDLING LARGE RESULTS (>100KB with many local_actions_required)\n' +
+    'When this tool returns local_actions_required array with many actions (>10) or large content fields:\n' +
+    '  (1) DO NOT try to display or read the full result JSON — it may be 100KB-500KB.\n' +
+    '  (2) DO NOT just read the summary field and stop — local_actions are MANDATORY.\n' +
+    '  (3) IMMEDIATELY start executing actions in order:\n' +
+    '      - Parse each action from local_actions_required array\n' +
+    '      - Execute write_file / merge_mcp_json / delete_file as instructed below\n' +
+    '      - Track success/failure count for each action\n' +
+    '  (4) Report concise summary to user: "Executed 46 local actions: 45 succeeded, 1 failed"\n' +
+    '  (5) Only show failed actions in detail (do not list all successful actions)\n' +
+    '\n' +
     'Rule and MCP resources are returned as `local_actions_required` — an ordered list of ' +
     'write_file, merge_mcp_json, or other actions that the AI Agent MUST execute on the ' +
     'USER\'S LOCAL MACHINE after receiving the response. ' +
@@ -860,6 +872,7 @@ export const syncResourcesTool = {
     'and pass Object.keys(mcpServers || {}) as `configured_mcp_servers` parameter. ' +
     'This allows the server to skip downloading MCP resources that are already configured, ' +
     'significantly reducing API calls, network traffic, and local action overhead. ' +
+    '\n' +
     'For write_file actions: ' +
     '  SPECIAL HANDLING FOR COMPLEX SKILLS (when action has `is_skill_manifest: true`): ' +
     '    (1) This action is the FIRST script file — check skill version using manifest FIRST. ' +

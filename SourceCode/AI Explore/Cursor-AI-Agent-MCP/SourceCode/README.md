@@ -746,6 +746,24 @@ GET /sse
 
 ## Version History
 
+### v0.1.30 (2026-03-30)
+
+**Bug Fix - Large Payload Handling:**
+- **Problem**: `sync_resources` tool returns large payload (>100KB) with many `local_actions_required` actions, causing AI Agent to truncate or ignore them → local operations (Rules/MCPs/Skills) not executed
+- **Root Cause**: AI Agent prioritizes displaying summary over parsing large arrays, missing critical write_file/merge_mcp_json operations
+- **Fix**: Enhanced Tool Description and Rule guidance to explicitly instruct AI Agent:
+  - ❌ Do NOT try to display full result (may be 100KB-500KB)
+  - ❌ Do NOT just read summary and stop
+  - ✅ IMMEDIATELY parse and execute all `local_actions_required` operations
+  - ✅ Track success/failure, report concise summary to user
+
+**Changes:**
+- `sync_resources` Tool Description: Added "⚠️ CRITICAL: HANDLING LARGE RESULTS" section with explicit anti-pattern warnings
+- `csp-ai-prompts.mdc` Chapter Zero: Enhanced Step 2 with large-result processing guidance
+- Both documents emphasize: execute first, report later (not read first, display first)
+
+**Impact**: Fixes critical UX issue where AI Agent ignores local operations, ensuring Rules/MCPs/Skills are correctly installed on user's machine.
+
 ### v0.1.29 (2026-03-30)
 
 **Breaking Change - Manifest-Based Path Isolation:**
