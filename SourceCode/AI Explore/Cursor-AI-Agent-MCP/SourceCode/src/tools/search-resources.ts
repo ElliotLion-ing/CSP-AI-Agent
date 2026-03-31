@@ -9,6 +9,11 @@ import { filesystemManager } from '../filesystem/manager';
 import { getCursorResourcePath } from '../utils/cursor-paths.js';
 import { MCPServerError } from '../types/errors';
 import type { SearchResourcesParams, SearchResourcesResult, ToolResult } from '../types/tools';
+import { SearchCoordinator } from '../search';
+
+// Search coordinator singleton
+const searchCoordinator = new SearchCoordinator();
+
 // Simple in-memory cache
 const searchCache = new Map<string, { results: SearchResourcesResult; timestamp: number }>();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
@@ -92,9 +97,27 @@ export async function searchResources(params: unknown): Promise<ToolResult<Searc
       typedParams.user_token
     );
 
+    // ✅ MCP Server-side enhanced search (Tier 1 + Tier 2)
+    logger.debug({ apiResultCount: searchResults.results.length }, 'Applying MCP-side search enhancement...');
+    
+    const enhancedResults = searchCoordinator.enhancedSearch(
+      typedParams.keyword || '',
+      searchResults.results,
+      20 // maxResults
+    );
+
+    logger.info(
+      { 
+        apiResults: searchResults.results.length,
+        enhancedResults: enhancedResults.length,
+        topScore: enhancedResults[0]?.score
+      },
+      'Search enhancement applied'
+    );
+
     // Check subscription and installation status for each result
-    const enhancedResults = await Promise.all(
-      searchResults.results.map(async (resource) => {
+    const finalResults = await Promise.all(
+      enhancedResults.map(async (resource) => {
         // Check if installed locally in the Cursor directory for this resource type
         let isInstalled = false;
         try {
@@ -114,8 +137,8 @@ export async function searchResources(params: unknown): Promise<ToolResult<Searc
 
     // Build final result
     const result: SearchResourcesResult = {
-      total: searchResults.total,
-      results: enhancedResults,
+      total: finalResults.length,
+      results: finalResults,
     };
 
     // Cache the results
