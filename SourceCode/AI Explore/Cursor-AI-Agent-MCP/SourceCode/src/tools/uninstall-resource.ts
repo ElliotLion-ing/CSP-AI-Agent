@@ -127,13 +127,23 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
     const isMcp  = !knownType || knownType === 'mcp';
 
     if (isRule) {
-      // Rule: delete ~/.cursor/rules/<pattern>.mdc and .md variants.
-      const rulesDir = getCursorTypeDirForClient('rule');
-      for (const ext of ['.mdc', '.md']) {
-        const filePath = `${rulesDir}/${pattern}${ext}`;
-        localActions.push({ action: 'delete_file', path: filePath });
-        removedResources.push({ id: pattern, name: pattern, path: filePath });
+      // Rule: delete from BOTH global and workspace locations (dual-layer cleanup).
+      // Even if one location doesn't exist, the AI will skip gracefully (delete_file is idempotent).
+      const globalRulesDir = getCursorTypeDirForClient('rule');  // ~/.cursor/rules/
+      const workspaceRulesDir = '.cursor/rules';                 // relative to workspace root
+      
+      for (const rulesDir of [globalRulesDir, workspaceRulesDir]) {
+        for (const ext of ['.mdc', '.md']) {
+          const filePath = `${rulesDir}/${pattern}${ext}`;
+          localActions.push({ action: 'delete_file', path: filePath });
+          removedResources.push({ id: pattern, name: pattern, path: filePath });
+        }
       }
+      
+      logger.info(
+        { pattern, locations: [globalRulesDir, workspaceRulesDir] },
+        'Rule uninstall: queued delete_file actions for BOTH global and workspace locations',
+      );
     }
 
     if (isMcp) {
@@ -200,8 +210,11 @@ export const uninstallResourceTool = {
   description:
     'Uninstall a resource from the user\'s local machine. ' +
     'Command/Skill resources: unregisters MCP Prompt from memory and queues local script directory deletion. ' +
-    'Rule/MCP resources: returns `local_actions_required` with delete_file and remove_mcp_json_entry actions. ' +
+    'Rule resources: returns `local_actions_required` with delete_file actions for BOTH global (~/.cursor/rules/) ' +
+    'and workspace (<workspace>/.cursor/rules/) locations to ensure complete cleanup across all platforms. ' +
+    'MCP resources: returns delete_file and remove_mcp_json_entry actions. ' +
     'For delete_file actions: delete the file or directory at the given path (recursive if flag set). ' +
+    'File not existing is NOT an error — skip silently. ' +
     'For remove_mcp_json_entry actions: read ~/.cursor/mcp.json, delete the matching ' +
     'mcpServers key, then write the file back. ' +
     'Set remove_from_account: true to also cancel the server-side subscription. ' +

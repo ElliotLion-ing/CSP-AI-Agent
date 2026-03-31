@@ -703,41 +703,62 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
         // identical — avoiding unnecessary disk I/O. If the local file is missing
         // or has different content, the AI writes it unconditionally, which also
         // recovers files that were accidentally deleted by the user.
+        //
+        // DUAL-LAYER STRATEGY (v1.6):
+        //   - scope='global'    → write to ~/.cursor/rules/ only (macOS support)
+        //   - scope='workspace' → write to ${WORKSPACE}/.cursor/rules/ only (Windows support)
+        //   - scope='all'       → write to BOTH locations (maximum compatibility)
         if (sub.type === 'rule') {
-          const typeDir = getCursorTypeDirForClient(sub.type);
           const writeActions: Array<{ destPath: string; contentLength: number }> = [];
 
-          for (const file of resourceFiles) {
-            const normalised = path.normalize(file.path);
-            if (normalised.startsWith('..')) {
-              logger.warn({ resourceId: sub.id, filePath: file.path }, 'Skipping suspicious file path');
-              continue;
+          // Determine target directories based on scope parameter
+          const targetDirs: string[] = [];
+          if (scope === 'global' || scope === 'all') {
+            targetDirs.push(getCursorTypeDirForClient(sub.type));  // ~/.cursor/rules/
+          }
+          if (scope === 'workspace' || scope === 'all') {
+            targetDirs.push('.cursor/rules');  // relative to workspace root
+          }
+
+          for (const targetDir of targetDirs) {
+            for (const file of resourceFiles) {
+              const normalised = path.normalize(file.path);
+              if (normalised.startsWith('..')) {
+                logger.warn({ resourceId: sub.id, filePath: file.path }, 'Skipping suspicious file path');
+                continue;
+              }
+              const destPath = `${targetDir}/${normalised}`;
+              localActions.push({
+                action: 'write_file',
+                path: destPath,
+                content: file.content,
+              });
+              writeActions.push({ destPath, contentLength: file.content.length });
             }
-            const destPath = `${typeDir}/${normalised}`;
-            localActions.push({
-              action: 'write_file',
-              path: destPath,
-              content: file.content,
-            });
-            writeActions.push({ destPath, contentLength: file.content.length });
           }
 
           logger.info(
             {
               resourceId: sub.id,
               resourceName: sub.name,
-              typeDir,
+              scope,
+              targetDirs,
               fileCount: writeActions.length,
               files: writeActions,
-              clientSideNote: 'AI will compare file content directly; write is skipped if content is identical',
+              dualLayerNote: scope === 'all' 
+                ? 'DUAL-LAYER: Each file generates TWO independent write_file actions (global + workspace). AI must process BOTH actions separately — skipping one does NOT skip the other.'
+                : 'Single-layer sync',
+              clientSideNote: 'AI will compare file content directly; write is skipped if content is identical FOR EACH ACTION INDEPENDENTLY',
             },
-            'sync_resources: Rule — write_file actions queued for AI (client-side content comparison)',
+            'sync_resources: Rule — write_file actions queued for AI (dual-layer strategy)',
           );
 
           tally.synced++;
           details.push({ id: sub.id, name: sub.name, action: 'synced', version: resourceVersion });
-          logToolStep('sync_resources', 'Rule: write_file actions queued for AI', {
+          logToolStep('sync_resources', 'Rule: write_file actions queued for AI (dual-layer)', {
             resourceId: sub.id,
+            scope,
+            targetCount: targetDirs.length,
             fileCount: resourceFiles.length,
           });
           continue;
@@ -903,6 +924,14 @@ export const syncResourcesTool = {
     '    (3) SKIP the write if they are EXACTLY equal — the file is already up-to-date. ' +
     '    (4) Otherwise, create any missing parent directories and write the file. ' +
     '    (5) If `mode` field is present (e.g. "0755"), set file permissions using fs.chmod() on Unix systems. ' +
+    '  CRITICAL — DUAL-LAYER RULE SYNC (when scope=all): ' +
+    '    When syncing Rule resources with scope=all, the server generates TWO INDEPENDENT write_file actions: ' +
+    '    one for global (~/.cursor/rules/) and one for workspace (<workspace>/.cursor/rules/). ' +
+    '    The AI MUST process EACH action independently with its own content comparison: ' +
+    '    - Action #1: Compare ~/.cursor/rules/xxx.mdc content → skip if identical, write if different. ' +
+    '    - Action #2: Compare .cursor/rules/xxx.mdc content → skip if identical, write if different. ' +
+    '    NEVER assume both locations have the same content. NEVER skip action #2 just because action #1 was skipped. ' +
+    '    Example: global is v2.0 (skip), workspace is v1.0 (must update) — both actions must be checked separately. ' +
     'For merge_mcp_json actions: ' +
     '  (1) If the action has `skip_if_exists: true` AND `mcpServers[server_name]` already exists ' +
     '      in ~/.cursor/mcp.json, SKIP this action entirely — the server is already configured ' +
@@ -920,7 +949,12 @@ export const syncResourcesTool = {
       },
       scope: {
         type: 'string',
-        description: 'Installation scope: global (~/.cursor/), workspace (.cursor/), or all',
+        description:
+          'Installation scope for Rule resources: ' +
+          'global (~/.cursor/rules/ - works on macOS), ' +
+          'workspace (<workspace>/.cursor/rules/ - works on Windows + macOS), ' +
+          'all (both locations - maximum compatibility). ' +
+          'Command/Skill/MCP resources ignore this parameter (always registered as MCP Prompts or global).',
         enum: ['global', 'workspace', 'all'],
         default: 'global',
       },

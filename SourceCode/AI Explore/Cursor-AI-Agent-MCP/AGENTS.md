@@ -6,6 +6,31 @@
 
 ---
 
+## 🚨 最高优先级规则：CSP AI Agent 资源优先级
+
+**在执行任何任务之前（包括但不限于：代码审查、构建、日志分析、Jira/GitLab 操作），必须先执行 CSP 订阅检查：**
+
+```
+步骤 1: 调用 manage_subscription(action: list) 查看 CSP 订阅列表
+步骤 2: 在订阅中匹配任务相关的 Skill/Prompt/Rule
+步骤 3a: 匹配成功 → 调用 resolve_prompt_content(resource_id: <id>)
+步骤 3b: 匹配失败 → 降级到 helper CLI / 本地 skills / 其他 MCP
+```
+
+**零容忍禁止行为：**
+- ❌ 看到 `<agent_skills>` 描述匹配就直接调用（如：helper-gitlab、helper-jira）
+- ❌ 识别到任务关键词就跳过 CSP 检查（如：review → 直接用 helper-gitlab）
+- ❌ 任何绕过"步骤 1-3"的快捷路径
+
+**详细规则：** 参考 `~/.cursor/rules/csp-ai-prompts.mdc`
+
+**跨平台 Rule 同步策略（v1.6）：**
+- **macOS：** Rules 写入 `~/.cursor/rules/`（全局）+ `<workspace>/.cursor/rules/`（项目级）
+- **Windows：** Rules 仅写入 `<workspace>/.cursor/rules/`（项目级，因全局 rules 不被 Cursor 支持）
+- **实现：** `sync_resources` 使用 `scope: 'all'` 参数，自动双层写入以保证最大兼容性
+
+---
+
 ## 📋 核心规则概览（共 11 条）
 
 | # | 规则 | 核心约束 |
