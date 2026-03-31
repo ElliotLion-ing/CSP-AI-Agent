@@ -181,7 +181,8 @@ export async function uploadResource(params: unknown): Promise<ToolResult<Upload
     const resourceId   = typedParams.resource_id;
     const userToken    = typedParams.user_token;
     const targetSource = typedParams.target_source ?? 'csp';
-    const force        = (typedParams as any).force || false;
+    const paramsWithForce = typedParams as unknown as Record<string, unknown>;
+    const force        = (paramsWithForce.force as boolean | undefined) || false;
 
     // User-declared type always wins; auto-detect only when omitted.
     const resourceType = inferResourceType(typedParams.type, typedParams.files);
@@ -219,7 +220,7 @@ export async function uploadResource(params: unknown): Promise<ToolResult<Upload
               `Resource "${resourceName}" already exists. Add "force": true to overwrite.\n` +
               conflictInfo.map((c) => `  - ${c.name} (${c.type}, source: ${c.source})`).join('\n'),
             details: conflictInfo,
-          } as any,
+          },
         };
       }
     } catch (err) {
@@ -281,13 +282,14 @@ export async function uploadResource(params: unknown): Promise<ToolResult<Upload
              fileEntries[0]);
 
         const rawContent = primaryFile?.content ?? '';
-        const team = (typedParams as any).team ?? 'general';
+        const paramsWithMeta = typedParams as unknown as Record<string, unknown>;
+        const team = (paramsWithMeta.team as string | undefined) ?? 'general';
         const frontmatterDesc = extractFrontmatterDescription(rawContent);
         const description = frontmatterDesc ?? typedParams.message ?? resourceName;
 
         await promptManager.registerPrompt({
           resource_id: finalResourceId,
-          resource_type: resourceType as 'command' | 'skill',
+          resource_type: resourceType,
           resource_name: resourceName,
           team,
           description,

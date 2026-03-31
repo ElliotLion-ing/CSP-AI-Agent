@@ -3,10 +3,15 @@
  * HTTP client for CSP Resource Server
  */
 
-import axios, { AxiosInstance, AxiosRequestConfig, AxiosError } from 'axios';
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { config } from '../config';
 import { logger, logApiRequest, logApiError } from '../utils/logger';
 import { createAPIError } from '../types/errors';
+
+// Extended Axios config with timing metadata
+interface TimedAxiosRequestConfig extends InternalAxiosRequestConfig {
+  startTime?: number;
+}
 
 class APIClient {
   private client: AxiosInstance;
@@ -45,7 +50,7 @@ class APIClient {
             type: 'api_request_start',
             method: requestConfig.method?.toUpperCase(),
             url: requestConfig.url,
-            params: requestConfig.params,
+            params: requestConfig.params as Record<string, unknown> | undefined,
             data: requestConfig.data ? JSON.stringify(requestConfig.data).substring(0, 500) : undefined,
             headers: this.sanitizeHeaders(requestConfig.headers as Record<string, string>),
           },
@@ -53,11 +58,12 @@ class APIClient {
         );
         
         // Record start time for duration calculation
-        (requestConfig as any).startTime = Date.now();
+        const timedConfig = requestConfig as TimedAxiosRequestConfig;
+        timedConfig.startTime = Date.now();
         
         return requestConfig;
       },
-      (error) => {
+      (error: Error) => {
         logger.error({ 
           type: 'api_request_interceptor_error',
           error: error.message 
@@ -69,7 +75,8 @@ class APIClient {
     // Response interceptor for detailed logging
     this.client.interceptors.response.use(
       (response) => {
-        const startTime = (response.config as any).startTime || Date.now();
+        const timedConfig = response.config as TimedAxiosRequestConfig;
+        const startTime = timedConfig.startTime || Date.now();
         const duration = Date.now() - startTime;
         const method = response.config.method?.toUpperCase() || 'UNKNOWN';
         const url = response.config.url || 'unknown';
@@ -88,7 +95,8 @@ class APIClient {
         return response;
       },
       (error: AxiosError) => {
-        const startTime = (error.config as any)?.startTime || Date.now();
+        const timedConfig = error.config as TimedAxiosRequestConfig | undefined;
+        const startTime = timedConfig?.startTime || Date.now();
         const duration = Date.now() - startTime;
         const statusCode = error.response?.status;
         const method = error.config?.method?.toUpperCase() || 'UNKNOWN';

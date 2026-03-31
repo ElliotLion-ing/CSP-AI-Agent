@@ -82,8 +82,12 @@ Synchronize subscribed AI resources with hybrid sync strategy (v2.0).
 - **Path isolation**: Complex skills NOT stored in `~/.cursor/skills/` to prevent AI auto-discovery and ensure telemetry tracking
 - **Incremental mode**: Skips unchanged files using string content equality comparison (client-side)
 
+### Example: How AI Agent Executes LocalAction
+
+**Note:** The following code demonstrates how Cursor's AI Agent should process `local_actions_required` returned by `sync_resources`. This is **reference/example code** showing the expected behavior. Actual execution is controlled by the `csp-ai-prompts.mdc` Rule file and performed by the AI Agent running in the user's Cursor IDE.
+
 ```typescript
-// In Cursor AI Agent context
+// Example implementation in Cursor AI Agent context
 const mcpJson = JSON.parse(fs.readFileSync('~/.cursor/mcp.json', 'utf8'));
 const configured = Object.keys(mcpJson.mcpServers || {});
 
@@ -116,6 +120,8 @@ if (result.local_actions_required) {
   }
 }
 ```
+
+**For complete cross-platform path expansion logic (including Windows .cursor/.csp-ai-agent sibling directory resolution), refer to `csp-ai-prompts.mdc` Rule.**
 
 **Modes:**
 - `incremental` (default): Update only changed resources, skip unchanged files

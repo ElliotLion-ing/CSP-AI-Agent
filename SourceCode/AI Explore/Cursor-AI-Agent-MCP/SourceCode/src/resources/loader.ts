@@ -355,7 +355,7 @@ export class ResourceLoader {
         if (entry.isFile() && (entry.name.endsWith('.md') || entry.name.endsWith('.mdc'))) {
           // Handle file resources (commands, rules)
           const resourceName = path.basename(entry.name, path.extname(entry.name));
-          await this.indexResource(source, type, resourceName, fullPath, stats);
+          this.indexResource(source, type, resourceName, fullPath, stats);
         } else if (entry.isDirectory()) {
           // Handle directory resources:
           //   skill → must contain SKILL.md
@@ -365,7 +365,7 @@ export class ResourceLoader {
             const skillFile = path.join(fullPath, 'SKILL.md');
             try {
               await fs.access(skillFile);
-              await this.indexResource(source, type, entry.name, skillFile, stats);
+              this.indexResource(source, type, entry.name, skillFile, stats);
             } catch {
               logger.debug({ dir: fullPath }, 'Directory does not contain SKILL.md, skipping');
             }
@@ -373,7 +373,7 @@ export class ResourceLoader {
             const mcpConfigFile = path.join(fullPath, 'mcp-config.json');
             try {
               await fs.access(mcpConfigFile);
-              await this.indexResource(source, type, entry.name, mcpConfigFile, stats);
+              this.indexResource(source, type, entry.name, mcpConfigFile, stats);
             } catch {
               logger.debug({ dir: fullPath }, 'Directory does not contain mcp-config.json, skipping');
             }
@@ -396,13 +396,13 @@ export class ResourceLoader {
   /**
    * Index a single resource with conflict detection
    */
-  private async indexResource(
+  private indexResource(
     source: AIResourcesConfig['default_source'],
     type: ResourceType,
     name: string,
     filePath: string,
     stats: LoaderStats
-  ): Promise<void> {
+  ): void {
     const resourceKey = `${type}:${name}`;
     const existing = this.resourceIndex.get(resourceKey);
 

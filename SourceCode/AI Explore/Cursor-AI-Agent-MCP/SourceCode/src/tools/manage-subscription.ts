@@ -106,7 +106,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
 
         // Build a resource_id → type map from the current subscription list so
         // uninstall actions can be scoped precisely to rule vs mcp resources.
-        let idToType: Map<string, string> = new Map();
+        const idToType: Map<string, string> = new Map();
         try {
           const currentSubs = await apiClient.getSubscriptions({}, typedParams.user_token);
           for (const s of currentSubs.subscriptions) {

@@ -108,7 +108,7 @@ export class TelemetryManager {
   private activeTokens: Set<string> = new Set();
   /** Simple mutex: true while a file write is in progress. */
   private writing = false;
-  private writeQueue: Array<() => void> = [];
+  private writeQueue: Array<() => void | Promise<void>> = [];
 
   /**
    * @param filePath       Absolute path to the telemetry JSON file.
@@ -145,7 +145,8 @@ export class TelemetryManager {
   setUserToken(token: string): void {
     this.activeTokens.add(token);
     // Ensure the user slot exists without overwriting existing data.
-    this.withFileLock(async () => {
+    // eslint-disable-next-line @typescript-eslint/require-await
+    void this.withFileLock(async () => {
       const data = this.readFile();
       if (!data.users[token]) {
         data.users[token] = emptyUserTelemetry();
@@ -173,6 +174,7 @@ export class TelemetryManager {
     userToken: string,
     jiraId?: string,
   ): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/require-await
     await this.withFileLock(async () => {
       const data = this.readFile();
       const user = this.ensureUserSlot(data, userToken);
@@ -208,6 +210,7 @@ export class TelemetryManager {
    * Called after sync_resources or manage_subscription completes.
    */
   async updateSubscribedRules(rules: SubscribedRule[], userToken: string): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/require-await
     await this.withFileLock(async () => {
       const data = this.readFile();
       this.ensureUserSlot(data, userToken).subscribed_rules = rules;
@@ -220,6 +223,7 @@ export class TelemetryManager {
    * Called after sync_resources or manage_subscription completes for MCP resources.
    */
   async updateConfiguredMcps(mcps: ConfiguredMcp[], userToken: string): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/require-await
     await this.withFileLock(async () => {
       const data = this.readFile();
       this.ensureUserSlot(data, userToken).configured_mcps = mcps;
@@ -244,7 +248,8 @@ export class TelemetryManager {
     if (tokens.size === 0) return;
 
     const data = await new Promise<TelemetryFile>((resolve) => {
-      this.withFileLock(async () => {
+      // eslint-disable-next-line @typescript-eslint/require-await
+      void this.withFileLock(async () => {
         resolve(this.readFile());
       }).catch(() => resolve(this.readFile()));
     });
@@ -305,7 +310,7 @@ export class TelemetryManager {
     if (!data.users[token]) {
       data.users[token] = emptyUserTelemetry();
     }
-    return data.users[token]!;
+    return data.users[token];
   }
 
   private readFile(): TelemetryFile {
@@ -344,24 +349,24 @@ export class TelemetryManager {
   /** Serialises file access to prevent concurrent write conflicts. */
   private async withFileLock(fn: () => Promise<void>): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      const run = async () => {
+      const run = async (): Promise<void> => {
         this.writing = true;
         try {
           await fn();
           resolve();
         } catch (err) {
-          reject(err);
+          reject(err instanceof Error ? err : new Error(String(err)));
         } finally {
           this.writing = false;
           const next = this.writeQueue.shift();
-          if (next) next();
+          if (next) void next();
         }
       };
 
       if (this.writing) {
         this.writeQueue.push(run);
       } else {
-        run();
+        void run();
       }
     });
   }
@@ -376,6 +381,7 @@ export class TelemetryManager {
         // the snapshot and now, so we must NOT blindly wipe pending_events=[].
         // Instead, re-read the file under lock and decrement each reported
         // event's invocation_count; remove it only when the count reaches zero.
+        // eslint-disable-next-line @typescript-eslint/require-await
         await this.withFileLock(async () => {
           const data = this.readFile();
           const user = data.users[token];
@@ -406,7 +412,8 @@ export class TelemetryManager {
       }
     }
     if (process.env.NODE_ENV !== 'test') {
-      process.stderr.write(`[telemetry] flush failed after ${MAX_RETRIES} retries: ${lastErr}\n`);
+      const errorMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+      process.stderr.write(`[telemetry] flush failed after ${MAX_RETRIES} retries: ${errorMsg}\n`);
     }
   }
 }

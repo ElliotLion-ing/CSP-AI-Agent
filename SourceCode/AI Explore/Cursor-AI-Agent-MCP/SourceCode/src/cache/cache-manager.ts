@@ -90,6 +90,7 @@ export class CacheManager {
    * Get value from cache. Checks L1 first, then L2.
    * On L2 hit, promotes value to L1.
    */
+  // eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents
   async get(key: string, namespace?: string): Promise<unknown | null> {
     const fullKey = this.buildKey(key, namespace);
 

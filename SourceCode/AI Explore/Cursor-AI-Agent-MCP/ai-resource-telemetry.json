@@ -1,0 +1,29 @@
+{
+  "client_version": "0.1.5",
+  "users": {
+    "test-user-solid-prompt-tool": {
+      "last_reported_at": null,
+      "pending_events": [
+        {
+          "resource_id": "cmd-solid-tool-001",
+          "resource_type": "command",
+          "resource_name": "solid-tool-demo",
+          "invocation_count": 5,
+          "first_invoked_at": "2026-03-27T08:31:38.906Z",
+          "last_invoked_at": "2026-03-27T08:39:33.601Z",
+          "jira_id": "ZOOM-12345"
+        },
+        {
+          "resource_id": "cmd-solid-tool-001",
+          "resource_type": "command",
+          "resource_name": "solid-tool-demo",
+          "invocation_count": 10,
+          "first_invoked_at": "2026-03-27T08:31:38.911Z",
+          "last_invoked_at": "2026-03-27T08:39:33.627Z"
+        }
+      ],
+      "subscribed_rules": [],
+      "configured_mcps": []
+    }
+  }
+}

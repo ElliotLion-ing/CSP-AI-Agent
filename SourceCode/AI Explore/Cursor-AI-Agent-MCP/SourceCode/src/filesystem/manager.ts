@@ -25,7 +25,7 @@ class FilesystemManager {
       await fs.writeFile(tempPath, content, 'utf-8');
 
       // Validate content (basic check)
-      await this.validateResourceContent(tempPath, content);
+      this.validateResourceContent(tempPath, content);
 
       // Atomic rename
       await fs.rename(tempPath, filePath);
@@ -55,7 +55,7 @@ class FilesystemManager {
       const content = await fs.readFile(filePath, 'utf-8');
 
       // Validate format
-      await this.validateResourceContent(filePath, content);
+      this.validateResourceContent(filePath, content);
 
       return content;
     } catch (error) {
@@ -104,7 +104,7 @@ class FilesystemManager {
   /**
    * Validate resource content
    */
-  private async validateResourceContent(filePath: string, content: string): Promise<void> {
+  private validateResourceContent(filePath: string, content: string): void {
     const ext = path.extname(filePath);
 
     // Check if empty
@@ -116,7 +116,7 @@ class FilesystemManager {
     if (ext === '.json') {
       try {
         JSON.parse(content);
-      } catch (error) {
+      } catch {
         throw createValidationError(filePath, 'json', 'Invalid JSON format');
       }
     } else if (ext === '.md') {
@@ -226,7 +226,7 @@ class FilesystemManager {
           await this.removeEmptyDirs(parentDir);
         }
       }
-    } catch (error) {
+    } catch {
       // Ignore errors (directory might not be empty or already deleted)
     }
   }

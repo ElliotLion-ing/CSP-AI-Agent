@@ -53,7 +53,7 @@ class MultiSourceGitManager {
   private async loadConfig(): Promise<AIResourcesConfig> {
     try {
       const configContent = await fs.readFile(this.configPath, 'utf-8');
-      return JSON.parse(configContent);
+      return JSON.parse(configContent) as AIResourcesConfig;
     } catch (error) {
       throw new Error(`Failed to load AI Resources config: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -481,7 +481,7 @@ class MultiSourceGitManager {
 
     for (const source of sources) {
       const sourcePath = path.join(this.baseDir, source.path);
-      const resourcesSubDir = source.resources[typeDir as keyof typeof source.resources];
+      const resourcesSubDir = source.resources[typeDir];
       const resourceDir = path.join(sourcePath, resourcesSubDir, resourceName);
       const resourceFile = path.join(sourcePath, resourcesSubDir, `${resourceName}.md`);
 
@@ -783,6 +783,7 @@ function resolveAiResourcesBase(): string {
   for (const candidate of candidates) {
     try {
       const configFile = path.join(candidate, 'ai-resources-config.json');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       require('fs').accessSync(configFile);
       logger.info({ aiResourcesBase: candidate }, 'AI-Resources base resolved');
       return candidate;

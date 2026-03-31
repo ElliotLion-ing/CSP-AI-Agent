@@ -1,10 +1,17 @@
 /**
  * Cursor IDE standard directory path resolver.
  *
- * Cursor stores user-level assets in platform-specific locations:
- *   macOS / Linux : ~/.cursor/<type>/
- *   Windows       : %APPDATA%\Cursor\User\<type>\
- *                   (typically C:\Users\<user>\AppData\Roaming\Cursor\User\<type>\)
+ * Cursor stores user-level assets in platform-specific locations.
+ * 
+ * DEFAULT BEHAVIOR (all platforms unified):
+ *   Windows: C:\Users\<Username>\.cursor\<type>\
+ *   macOS:   /Users/<user>/.cursor/<type>/
+ *   Linux:   /home/<user>/.cursor/<type>/
+ * 
+ * FALLBACK DISCOVERY (if not found in default location):
+ *   Windows: %APPDATA%\Cursor\User, %LOCALAPPDATA%\Cursor, Documents\.cursor
+ *   macOS:   ~/Library/Application Support/.cursor
+ *   Linux:   ~/.local/share/.cursor, ~/.config/.cursor
  *
  * Resource type → subdirectory mapping mirrors the actual Cursor directory layout.
  */
@@ -27,8 +34,17 @@ export const CURSOR_TYPE_DIRS: Record<string, string> = {
 /**
  * Returns the root of the Cursor user directory on the current platform.
  *
- * macOS / Linux : ~/.cursor
- * Windows       : %APPDATA%\Cursor\User
+ * CORRECTED BEHAVIOR (all platforms use same default logic):
+ *   Default: <USER_HOME>/.cursor (checked first on all platforms)
+ *   Windows: C:\Users\<Username>\.cursor
+ *   macOS:   /Users/<user>/.cursor
+ *   Linux:   /home/<user>/.cursor
+ *
+ * Dynamic fallback: If .cursor not found in user home, searches
+ * platform-specific alternative locations:
+ *   - Windows: %APPDATA%\Cursor\User, %LOCALAPPDATA%\Cursor, Documents\.cursor
+ *   - macOS: ~/Library/Application Support/.cursor
+ *   - Linux: ~/.local/share/.cursor, ~/.config/.cursor
  *
  * NOTE: Only use this when running code on the USER's local machine.
  * When generating paths for LocalAction instructions (which are executed by the
@@ -36,13 +52,66 @@ export const CURSOR_TYPE_DIRS: Record<string, string> = {
  * instead to avoid returning the server's home directory.
  */
 export function getCursorRootDir(): string {
-  if (process.platform === 'win32') {
-    // APPDATA is always set on Windows; fall back to USERPROFILE as a safety net
-    const appData = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
-    return path.join(appData, 'Cursor', 'User');
+  const homeDir = os.homedir();
+  const defaultPath = path.join(homeDir, '.cursor');
+
+  // 1. Check default location (priority: user home directory)
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    if (require('fs').existsSync(defaultPath)) {
+      return defaultPath;
+    }
+  } catch {
+    // If fs module not available or error, return default path
+    return defaultPath;
   }
-  // macOS and Linux both use ~/.cursor
-  return path.join(os.homedir(), '.cursor');
+
+  // 2. Fallback: search platform-specific alternative locations
+  const fallbackPaths: string[] = [];
+
+  if (process.platform === 'win32') {
+    // Windows alternatives (in case of non-standard installation)
+    const appData = process.env.APPDATA;
+    const localAppData = process.env.LOCALAPPDATA;
+    if (appData) {
+      fallbackPaths.push(
+        path.join(appData, 'Cursor', 'User'),      // Legacy/enterprise location
+        path.join(appData, 'Cursor', '.cursor'),
+      );
+    }
+    if (localAppData) {
+      fallbackPaths.push(path.join(localAppData, 'Cursor'));
+    }
+    fallbackPaths.push(path.join(homeDir, 'Documents', '.cursor'));
+  } else if (process.platform === 'darwin') {
+    // macOS alternatives
+    fallbackPaths.push(
+      path.join(homeDir, 'Library', 'Application Support', '.cursor'),
+    );
+  } else {
+    // Linux alternatives
+    fallbackPaths.push(
+      path.join(homeDir, '.local', 'share', '.cursor'),
+      path.join(homeDir, '.config', '.cursor'),
+    );
+  }
+
+  // Check each fallback path
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
+    const fs = require('fs');
+    for (const p of fallbackPaths) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      if (fs.existsSync(p)) {
+        return p;
+      }
+    }
+  } catch {
+    // If fs module not available, return default
+  }
+
+  // 3. Last resort: return default path (will be created when needed)
+  return defaultPath;
 }
 
 /**
@@ -127,9 +196,109 @@ export function getCursorResourcePath(resourceType: string, resourceName: string
  * Stored at the Cursor root level (not inside a resource-type subdirectory)
  * so it persists independently of individual resource installs/uninstalls.
  *
- * macOS / Linux : ~/.cursor/ai-resource-telemetry.json
- * Windows       : %APPDATA%\Cursor\User\ai-resource-telemetry.json
+ * All platforms: <USER_HOME>/.cursor/ai-resource-telemetry.json
+ * Windows: C:\Users\<Username>\.cursor\ai-resource-telemetry.json
+ * macOS:   /Users/<user>/.cursor/ai-resource-telemetry.json
+ * Linux:   /home/<user>/.cursor/ai-resource-telemetry.json
  */
 export function getTelemetryFilePath(): string {
   return path.join(getCursorRootDir(), 'ai-resource-telemetry.json');
+}
+
+// ============================================================================
+// CSP AI Agent Isolated Storage Paths
+// ============================================================================
+
+/**
+ * Returns the parent directory where .cursor is located.
+ * Used to ensure .csp-ai-agent is created as a sibling of .cursor.
+ *
+ * @returns Absolute path to the parent directory containing .cursor
+ */
+function getCursorParentDir(): string {
+  const cursorRoot = getCursorRootDir();  // Find actual .cursor location (with dynamic search)
+  return path.dirname(cursorRoot);        // Return its parent directory
+}
+
+/**
+ * Returns the root directory for CSP AI Agent isolated storage (LOCAL execution).
+ *
+ * CRITICAL DESIGN RULE: .csp-ai-agent MUST be a sibling of .cursor.
+ *
+ * Strategy:
+ *   1. Find where .cursor actually exists (getCursorRootDir with dynamic search)
+ *   2. Extract parent directory of .cursor
+ *   3. Place .csp-ai-agent in THE SAME parent directory
+ *
+ * Examples:
+ *   If .cursor is at C:\Users\Elliot.Ding\.cursor
+ *   → Parent:       C:\Users\Elliot.Ding
+ *   → .csp-ai-agent = C:\Users\Elliot.Ding\.csp-ai-agent (SIBLING)
+ *
+ *   If .cursor is at /Users/elliot/.cursor
+ *   → Parent:       /Users/elliot
+ *   → .csp-ai-agent = /Users/elliot/.csp-ai-agent (SIBLING)
+ *
+ *   If .cursor is at C:\Users\John\AppData\Roaming\Cursor\User (non-standard)
+ *   → Parent:       C:\Users\John\AppData\Roaming\Cursor
+ *   → .csp-ai-agent = C:\Users\John\AppData\Roaming\Cursor\.csp-ai-agent (SIBLING)
+ *
+ * This ensures consistent sibling directory layout across all platforms.
+ *
+ * NOTE: This function is for LOCAL execution only (when MCP server runs on user's machine).
+ * For LocalAction instructions, use getCspAgentRootDirForClient().
+ */
+export function getCspAgentRootDir(): string {
+  const parentDir = getCursorParentDir();
+  return path.join(parentDir, '.csp-ai-agent');
+}
+
+/**
+ * Returns CSP AI Agent root directory path for client-side LocalAction instructions.
+ *
+ * This is a symbolic path that the AI Agent will resolve on the user's machine.
+ *
+ * AI Agent resolution strategy (MUST implement on client side):
+ *   1. Find .cursor directory location:
+ *      - Windows: Check C:\Users\<Username>\.cursor first, then search AppData
+ *      - macOS:   Check /Users/<user>/.cursor first, then search Library
+ *      - Linux:   Check /home/<user>/.cursor first, then search .local, .config
+ *   2. Extract parent directory of .cursor
+ *   3. Place .csp-ai-agent in THE SAME parent directory
+ *
+ * @returns Symbolic path: "~/.csp-ai-agent" (AI Agent expands based on .cursor location)
+ */
+export function getCspAgentRootDirForClient(): string {
+  // Return portable tilde-based path
+  // AI Agent must expand this by finding .cursor's parent directory
+  return '~/.csp-ai-agent';
+}
+
+/**
+ * Returns CSP AI Agent subdirectory path for local execution.
+ *
+ * @param subdir - Subdirectory name ('skills', '.manifests', etc.)
+ * @returns Absolute local path
+ *
+ * @example
+ *   getCspAgentDir('skills')
+ *   // → Local: C:\Users\Elliot.Ding\.csp-ai-agent\skills (if .cursor in user home)
+ */
+export function getCspAgentDir(subdir: string): string {
+  return path.join(getCspAgentRootDir(), subdir);
+}
+
+/**
+ * Returns CSP AI Agent subdirectory path for client-side LocalAction instructions.
+ *
+ * @param subdir - Subdirectory name ('skills', '.manifests', etc.)
+ * @returns Symbolic path for AI Agent to resolve
+ *
+ * @example
+ *   getCspAgentDirForClient('skills')
+ *   // → "~/.csp-ai-agent/skills"
+ *   // AI Agent resolves to: C:\Users\Elliot.Ding\.csp-ai-agent\skills (if .cursor in user home)
+ */
+export function getCspAgentDirForClient(subdir: string): string {
+  return `${getCspAgentRootDirForClient()}/${subdir}`;
 }

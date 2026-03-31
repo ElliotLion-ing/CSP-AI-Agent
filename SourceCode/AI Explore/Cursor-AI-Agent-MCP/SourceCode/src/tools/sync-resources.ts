@@ -25,6 +25,7 @@ import {
   getCursorResourcePath,
   getCursorTypeDirForClient,
   getCursorRootDirForClient,
+  getCspAgentDirForClient,
 } from '../utils/cursor-paths';
 import { MCPServerError } from '../types/errors';
 import type {
@@ -200,9 +201,10 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
           if (sub.type === 'command' || sub.type === 'skill') {
             const meta = {
               resource_id: sub.id,
+              // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
               resource_type: sub.type as 'command' | 'skill',
               resource_name: sub.name,
-              team: (sub as any).team ?? 'general',
+              team: ((sub as Record<string, unknown>).team as string | undefined) ?? 'general',
             };
             const isRegistered = promptManager.has(promptManager.buildPromptName(meta), userToken ?? '');
             if (isRegistered) {
@@ -254,7 +256,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             if (sourceFiles.length === 0) {
               sourceFiles = await multiSourceGitManager.readResourceFiles(
                 sub.name,
-                sub.type as 'command' | 'skill',
+                sub.type,
               );
               if (sourceFiles.length > 0) {
                 logToolStep('sync_resources', 'Loaded resource files from local git checkout', {
@@ -287,16 +289,18 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             // Extract description from frontmatter (---\ndescription: ...\n---)
             // falling back to the subscription's description field or resource name.
             const frontmatterDesc = extractFrontmatterDescription(rawContent);
+            const subWithMeta = sub as Record<string, unknown>;
             const description =
               frontmatterDesc ??
-              (sub as any).description ??
+              (subWithMeta.description as string | undefined) ??
               sub.name;
 
             const meta = {
               resource_id: sub.id,
+              // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
               resource_type: sub.type as 'command' | 'skill',
               resource_name: sub.name,
-              team: (sub as any).team ?? 'general',
+              team: (subWithMeta.team as string | undefined) ?? 'general',
               description,
               rawContent,
             };
@@ -313,7 +317,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             try {
               const metadata = await multiSourceGitManager.scanResourceMetadata(
                 sub.name,
-                sub.type as 'command' | 'skill'
+                sub.type
               );
               
               if (metadata.has_scripts && metadata.script_files) {
@@ -325,7 +329,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                 // Use isolated directory for complex skills (not ~/.cursor/skills/)
                 // SKILL.md is NOT downloaded — only scripts are cached locally
                 // This prevents Cursor from auto-discovering the skill while enabling script execution
-                const skillDir = `~/.csp-ai-agent/skills/${sub.name}`;
+                const skillDir = `${getCspAgentDirForClient('skills')}/${sub.name}`;
                 
                 // Generate write_file actions for script files ONLY (exclude SKILL.md)
                 // First script file carries is_skill_manifest marker for atomic update check
@@ -799,21 +803,27 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
     // Rules: cannot track individual invocations; report subscription list only.
     const subscribedRules = subscriptions.subscriptions
       .filter((s) => s.type === 'rule')
-      .map((s) => ({
-        resource_id: s.id,
-        resource_name: s.name,
-        subscribed_at: (s as any).subscribed_at ?? new Date().toISOString(),
-      }));
+      .map((s) => {
+        const subWithMeta = s as Record<string, unknown>;
+        return {
+          resource_id: s.id,
+          resource_name: s.name,
+          subscribed_at: (subWithMeta.subscribed_at as string | undefined) ?? new Date().toISOString(),
+        };
+      });
     if (userToken) telemetry.updateSubscribedRules(subscribedRules, userToken).catch(() => {});
 
     // MCPs: individual invocation tracking is each MCP server's own responsibility.
     const configuredMcps = subscriptions.subscriptions
       .filter((s) => s.type === 'mcp')
-      .map((s) => ({
-        resource_id: s.id,
-        resource_name: s.name,
-        configured_at: (s as any).subscribed_at ?? new Date().toISOString(),
-      }));
+      .map((s) => {
+        const subWithMeta = s as Record<string, unknown>;
+        return {
+          resource_id: s.id,
+          resource_name: s.name,
+          configured_at: (subWithMeta.subscribed_at as string | undefined) ?? new Date().toISOString(),
+        };
+      });
     if (userToken) telemetry.updateConfiguredMcps(configuredMcps, userToken).catch(() => {});
 
     return { success: true, data: result };
@@ -849,6 +859,9 @@ export const syncResourcesTool = {
     'Synchronize subscribed AI resources with hybrid sync strategy. ' +
     'Command and Skill resources: registered as MCP Prompts on the server. Complex skills with scripts ' +
     'download local files to ISOLATED PATH (~/.csp-ai-agent/skills/<name>/) to prevent AI auto-discovery. ' +
+    'CRITICAL: .csp-ai-agent MUST be a SIBLING of .cursor (same parent directory). ' +
+    'AI Agent on Windows must: (1) find .cursor location (check user home first, then AppData), ' +
+    '(2) extract parent directory, (3) create .csp-ai-agent in that parent directory. ' +
     'This ensures telemetry tracking by forcing resolve_prompt_content as entry point. ' +
     'If the user subscribed to a NEW Command or Skill in THIS conversation and you need to execute it immediately, do NOT wait for native prompts/get. ' +
     'After this tool completes, call `resolve_prompt_content` with the new prompt_name or resource_id, then execute the returned content. ' +
@@ -876,12 +889,13 @@ export const syncResourcesTool = {
     'For write_file actions: ' +
     '  SPECIAL HANDLING FOR COMPLEX SKILLS (when action has `is_skill_manifest: true`): ' +
     '    (1) This action is the FIRST script file — check skill version using manifest FIRST. ' +
-    '    (2) Read manifest file at ~/.csp-ai-agent/.manifests/<skill-name>.md (if exists). ' +
+    '    (2) Read manifest file at {CSP_AGENT_ROOT}/.manifests/<skill-name>.md (if exists). ' +
+    '        Where {CSP_AGENT_ROOT} is a SIBLING of {CURSOR_ROOT} (same parent directory). ' +
     '    (3) Compare manifest content with action.skill_manifest_content field (string equality). ' +
     '    (4) If identical: SKIP this action AND ALL SUBSEQUENT write_file actions for this skill. ' +
     '    (5) If different or manifest missing: ' +
     '        - PROCEED with this action and all subsequent write_file actions for this skill. ' +
-    '        - After writing all script files, write action.skill_manifest_content to ~/.csp-ai-agent/.manifests/<skill-name>.md ' +
+    '        - After writing all script files, write action.skill_manifest_content to {CSP_AGENT_ROOT}/.manifests/<skill-name>.md ' +
     '    (6) NOTE: SKILL.md is NEVER written to the skills directory (only to .manifests/) to prevent Cursor auto-discovery. ' +
     '  GENERAL HANDLING (when action has NO `is_skill_manifest` marker): ' +
     '    (1) Read the existing file at `path` (if it exists) using fs.readFile() or equivalent. ' +

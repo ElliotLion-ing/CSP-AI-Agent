@@ -81,14 +81,15 @@ export class HTTPServer {
       contentSecurityPolicy: false, // Disable for SSE
     });
 
-    this.fastify.addHook('onRequest', async (request) => {
+    this.fastify.addHook('onRequest', (request, _reply, done) => {
       logger.debug(
         { method: request.method, url: request.url, ip: request.ip },
         'HTTP request received'
       );
+      done();
     });
 
-    this.fastify.addHook('onResponse', async (request) => {
+    this.fastify.addHook('onResponse', (request, _reply, done) => {
       logger.debug(
         {
           method: request.method,
@@ -97,6 +98,7 @@ export class HTTPServer {
         },
         'HTTP response sent'
       );
+      done();
     });
   }
 
@@ -125,7 +127,7 @@ export class HTTPServer {
     });
 
     // Root info
-    this.fastify.get('/', async () => ({
+    this.fastify.get('/', () => ({
       server: 'CSP AI Agent MCP Server',
       version: '1.0.0',
       transport: 'sse',
@@ -172,7 +174,8 @@ export class HTTPServer {
       // Flush any pending telemetry immediately on (re)connect so events from
       // before a disconnect are not held until the next 10-second tick.
       telemetry.flushOnReconnect();
-      syncResources({ mode: 'incremental', scope: 'global', user_token: userToken }).then(async (result) => {
+      // eslint-disable-next-line @typescript-eslint/require-await
+      void syncResources({ mode: 'incremental', scope: 'global', user_token: userToken }).then(async (result) => {
         if (result.success) {
           logger.info(
             { userId, synced: result.data?.summary?.synced, cached: result.data?.summary?.cached },
@@ -193,7 +196,7 @@ export class HTTPServer {
           logger.warn({ userId, error: result.error }, 'Auto sync_resources on connect failed');
         }
       }).catch((err) => {
-        logger.error({ userId, err }, 'Auto sync_resources on connect threw an error');
+        logger.error({ userId, error: err instanceof Error ? err.message : String(err) }, 'Auto sync_resources on connect threw an error');
       });
     };
 
@@ -268,7 +271,7 @@ export class HTTPServer {
       const sessionOptions = request.user
         ? { userId: request.user.userId, email: request.user.email, groups: request.user.groups }
         : undefined;
-      const session = await sessionManager.createSession(token, request.ip ?? '', sessionOptions);
+      const session = sessionManager.createSession(token, request.ip ?? '', sessionOptions);
 
       logger.info(
         { sessionId: session.id, userId: session.userId, email: session.email },

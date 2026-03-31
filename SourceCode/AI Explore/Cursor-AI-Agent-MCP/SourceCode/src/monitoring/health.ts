@@ -1,5 +1,18 @@
 import { CacheManager } from '../cache/cache-manager.js';
 
+// Type for Redis client
+interface RedisClient {
+  isReady: boolean;
+  ping: () => Promise<string>;
+}
+
+// Type for cache with Redis backend
+interface CacheWithRedis {
+  l2Cache?: {
+    client?: RedisClient;
+  };
+}
+
 export interface HealthStatus {
   status: 'healthy' | 'unhealthy';
   timestamp: string;
@@ -39,14 +52,15 @@ export class HealthChecker {
 
     try {
       // Try to check Redis connection via cache manager
-      const redisCache = (this.cacheManager as any).l2Cache;
+      const cacheWithRedis = this.cacheManager as unknown as CacheWithRedis;
+      const redisCache = cacheWithRedis.l2Cache;
       
       if (!redisCache) {
         return { status: 'not_configured' };
       }
 
       // Try a simple Redis operation (check client status)
-      const client = (redisCache as any).client;
+      const client = redisCache.client;
       
       if (!client || !client.isReady) {
         return { status: 'down', error: 'Redis client not ready' };

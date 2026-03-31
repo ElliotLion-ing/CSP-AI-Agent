@@ -29,12 +29,23 @@ export interface WriteFileAction {
   /** 
    * Special marker for the FIRST script file in complex skills.
    * When true, client should perform atomic skill-level incremental check:
-   * 1. Read manifest file at ~/.csp-ai-agent/.manifests/<skill-name>.md (if exists)
+   * 1. Read manifest file at {CSP_AGENT_ROOT}/.manifests/<skill-name>.md (if exists)
+   *    Where {CSP_AGENT_ROOT} is a SIBLING of {CURSOR_ROOT} (same parent directory).
+   *    
+   *    Platform resolution:
+   *      Windows: Find .cursor first (C:\Users\<Username>\.cursor or AppData\Cursor\User),
+   *               then create .csp-ai-agent in same parent directory.
+   *               Example: If .cursor at C:\Users\Elliot.Ding\.cursor
+   *                        → .csp-ai-agent = C:\Users\Elliot.Ding\.csp-ai-agent
+   *      
+   *      macOS:   /Users/<user>/.csp-ai-agent (sibling of /Users/<user>/.cursor)
+   *      Linux:   /home/<user>/.csp-ai-agent (sibling of /home/<user>/.cursor)
+   * 
    * 2. Compare manifest content with skill_manifest_content field (string equality)
    * 3. If identical: skip this action AND all subsequent write_file actions for this skill
    * 4. If different or manifest missing: 
    *    - Execute this action and all subsequent write_file actions
-   *    - Write skill_manifest_content to ~/.csp-ai-agent/.manifests/<skill-name>.md
+   *    - Write skill_manifest_content to {CSP_AGENT_ROOT}/.manifests/<skill-name>.md
    * 
    * This enables atomic skill updates while keeping SKILL.md out of the skills directory
    * (preventing Cursor from auto-discovering it as a standalone skill).

@@ -8,7 +8,7 @@
 
 import { logger, logToolCall } from '../utils/logger';
 import { apiClient } from '../api/client';
-import { getCursorTypeDirForClient, getCursorRootDirForClient } from '../utils/cursor-paths.js';
+import { getCursorTypeDirForClient, getCursorRootDirForClient, getCspAgentDirForClient } from '../utils/cursor-paths.js';
 import { MCPServerError, createValidationError } from '../types/errors';
 import type { UninstallResourceParams, UninstallResourceResult, LocalAction, ToolResult } from '../types/tools';
 import { promptManager } from '../prompts/index.js';
@@ -60,10 +60,10 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
       // ── HYBRID SYNC: Check for local script files and delete them ───────────
       // For complex skills that have local scripts downloaded via sync_resources,
       // we need to clean up:
-      // 1. Script directory: ~/.csp-ai-agent/skills/<name>/
-      // 2. Manifest file: ~/.csp-ai-agent/.manifests/<name>.md
-      const skillDir = `~/.csp-ai-agent/skills/${pattern}`;
-      const manifestFile = `~/.csp-ai-agent/.manifests/${pattern}.md`;
+      // 1. Script directory: {CSP_AGENT_ROOT}/skills/<name>/ (sibling of .cursor)
+      // 2. Manifest file: {CSP_AGENT_ROOT}/.manifests/<name>.md
+      const skillDir = `${getCspAgentDirForClient('skills')}/${pattern}`;
+      const manifestFile = `${getCspAgentDirForClient('.manifests')}/${pattern}.md`;
       
       localActions.push({
         action: 'delete_file',

@@ -7,7 +7,7 @@ export interface ValidationError {
   field: string;
   message: string;
   expected?: string;
-  received?: any;
+  received?: unknown;
   suggestion?: string;
 }
 
@@ -36,7 +36,7 @@ export class RequestValidationError extends Error {
  * Validate required field
  */
 export function validateRequired(
-  value: any,
+  value: unknown,
   fieldName: string
 ): ValidationError | null {
   if (value === undefined || value === null || value === '') {
@@ -54,7 +54,7 @@ export function validateRequired(
  * Validate string type
  */
 export function validateString(
-  value: any,
+  value: unknown,
   fieldName: string
 ): ValidationError | null {
   if (typeof value !== 'string') {
@@ -72,19 +72,20 @@ export function validateString(
  * Validate enum value
  */
 export function validateEnum(
-  value: any,
+  value: unknown,
   fieldName: string,
   allowedValues: readonly string[]
 ): ValidationError | null {
-  if (!allowedValues.includes(value)) {
+  const strValue = String(value);
+  if (!allowedValues.includes(strValue)) {
     // Find closest match for suggestion
-    const suggestion = findClosestMatch(value, allowedValues);
+    const suggestion = findClosestMatch(strValue, allowedValues);
     
     return {
       field: fieldName,
       message: `Field '${fieldName}' has invalid value`,
       expected: `one of: ${allowedValues.map(v => `'${v}'`).join(', ')}`,
-      received: value,
+      received: strValue,
       suggestion: suggestion ? `Did you mean '${suggestion}'?` : undefined,
     };
   }
@@ -95,7 +96,7 @@ export function validateEnum(
  * Validate array type
  */
 export function validateArray(
-  value: any,
+  value: unknown,
   fieldName: string
 ): ValidationError | null {
   if (!Array.isArray(value)) {
@@ -113,7 +114,7 @@ export function validateArray(
  * Validate object type
  */
 export function validateObject(
-  value: any,
+  value: unknown,
   fieldName: string
 ): ValidationError | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -131,7 +132,7 @@ export function validateObject(
  * Validate boolean type
  */
 export function validateBoolean(
-  value: any,
+  value: unknown,
   fieldName: string
 ): ValidationError | null {
   if (typeof value !== 'boolean') {
@@ -149,7 +150,7 @@ export function validateBoolean(
  * Validate number type
  */
 export function validateNumber(
-  value: any,
+  value: unknown,
   fieldName: string
 ): ValidationError | null {
   if (typeof value !== 'number' || isNaN(value)) {
@@ -226,7 +227,7 @@ function levenshteinDistance(a: string, b: string): number {
 /**
  * Validate SSE connection parameters
  */
-export function validateSSEConnectionParams(_body: any): ValidationError[] {
+export function validateSSEConnectionParams(_body: Record<string, unknown>): ValidationError[] {
   const errors: ValidationError[] = [];
 
   // Validate Authorization header (will be checked in middleware)
@@ -238,7 +239,7 @@ export function validateSSEConnectionParams(_body: any): ValidationError[] {
 /**
  * Validate message parameters
  */
-export function validateMessageParams(body: any): ValidationError[] {
+export function validateMessageParams(body: Record<string, unknown>): ValidationError[] {
   const errors: ValidationError[] = [];
 
   // sessionId is required

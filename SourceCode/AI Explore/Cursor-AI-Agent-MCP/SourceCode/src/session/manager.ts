@@ -42,11 +42,11 @@ export class SessionManager {
    * @param ip - Client IP address
    * @param options - User info from /user/permissions API (userId, email, groups)
    */
-  async createSession(
+  createSession(
     token: string,
     ip: string,
     options?: CreateSessionOptions
-  ): Promise<Session> {
+  ): Session {
     const sessionId = randomUUID();
 
     const userId = options?.userId ?? this.extractUserIdFromToken(token);

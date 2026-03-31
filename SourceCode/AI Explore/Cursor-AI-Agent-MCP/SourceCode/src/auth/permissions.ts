@@ -80,7 +80,7 @@ const defaultPermissions: ToolPermission[] = [
 /**
  * Custom permission rules (can be overridden via config)
  */
-let permissionRules: Map<string, ToolPermission> = new Map();
+const permissionRules: Map<string, ToolPermission> = new Map();
 
 /**
  * Initialize permission system

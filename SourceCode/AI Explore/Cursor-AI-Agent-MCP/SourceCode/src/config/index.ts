@@ -253,7 +253,9 @@ try {
   config = loadConfig();
 } catch (error) {
   // Use logger for consistent error reporting
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
   const logger = require('../utils/logger').logger;
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
   logger.error(
     { 
       type: 'config', 
