@@ -20,7 +20,10 @@
     "type-check": "tsc --noEmit",
     "test": "echo \"Error: no test runner configured yet\" && exit 1",
     "clean": "rm -rf dist",
-    "prebuild": "npm run clean"
+    "prebuild": "npm run clean",
+    "audit": "npm audit --audit-level=high",
+    "audit:fix": "npm audit fix",
+    "security-check": "npm list plain-crypto-js 2>&1 && echo 'WARNING: Malicious package detected!' || echo 'Security check passed'"
   },
   "keywords": [
     "mcp",
@@ -40,7 +43,7 @@
     "@fastify/cors": "^11.2.0",
     "@fastify/helmet": "^13.0.2",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "axios": "^1.6.0",
+    "axios": "1.13.6",
     "dotenv": "^16.4.0",
     "fastify": "^5.8.2",
     "fuse.js": "^7.1.0",
@@ -50,6 +53,9 @@
     "pino-pretty": "^11.0.0",
     "pino-roll": "^4.0.0",
     "simple-git": "^3.22.0"
+  },
+  "overrides": {
+    "axios": "1.13.6"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
