@@ -1,0 +1,4 @@
+> npm run clean
+> rm -rf dist
+> tsc
+> chmod +x dist/index.js
