@@ -452,18 +452,25 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             expectedPromptNames.add(promptManager.buildPromptName(meta));
 
             // ── HYBRID SYNC: Check if skill/command needs local scripts ────────
-            // Use MCP Server's local git manager to scan for scripts.
-            // This eliminates the need for server-side metadata API endpoint.
+            // PRIORITY ORDER:
+            // 1. Use API-downloaded files (sourceFiles) — most reliable, includes all content
+            // 2. Fallback to Git scan only if API returned 0 files
+            // WHY: zoom-build and other complex skills are NOT in git but ARE in API response
+            
             try {
-              const metadata = await multiSourceGitManager.scanResourceMetadata(
-                sub.name,
-                sub.type
+              // Filter out markdown files from sourceFiles to identify scripts
+              const scriptFiles = sourceFiles.filter(f => 
+                !f.path.endsWith('.md') && 
+                f.path !== 'SKILL.md' &&
+                !f.path.endsWith('/SKILL.md')
               );
               
-              if (metadata.has_scripts && metadata.script_files) {
-                logToolStep('sync_resources', 'Complex skill detected — generating local actions', {
+              if (scriptFiles.length > 0) {
+                // Complex skill detected via API download
+                logToolStep('sync_resources', 'Complex skill detected (via API) — generating local actions', {
                   resourceId: sub.id,
-                  scriptCount: metadata.script_files.length,
+                  scriptCount: scriptFiles.length,
+                  source: 'API',
                 });
 
                 // Use isolated directory for complex skills (not ~/.cursor/skills/)
@@ -474,45 +481,102 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                 // Generate write_file actions for script files ONLY (exclude SKILL.md)
                 // First script file carries is_skill_manifest marker for atomic update check
                 
-                if (metadata.script_files.length > 0) {
-                  // 1. First script file (with manifest check marker)
-                  const firstScript = metadata.script_files[0];
-                  if (!firstScript) {
-                    logger.warn({ resourceId: sub.id }, 'script_files[0] is undefined despite length > 0');
-                  } else {
-                    localActions.push({
-                      action: 'write_file',
-                      path: `${skillDir}/${firstScript.relative_path}`,
-                      content: firstScript.content,
-                      encoding: firstScript.encoding ?? 'utf8',
-                      mode: firstScript.mode,
-                      // Atomic update marker: client checks manifest FIRST
-                      is_skill_manifest: true,
-                      // SKILL.md content for version comparison (stored separately in .manifests/)
-                      skill_manifest_content: rawContent,
-                    });
-                  }
+                // 1. First script file (with manifest check marker)
+                const firstScript = scriptFiles[0];
+                if (!firstScript) {
+                  logger.warn({ resourceId: sub.id }, 'scriptFiles[0] is undefined despite length > 0');
+                } else {
+                  localActions.push({
+                    action: 'write_file',
+                    path: `${skillDir}/${firstScript.path}`,
+                    content: firstScript.content,
+                    encoding: 'utf8',
+                    mode: firstScript.path.includes('/scripts/') ? '0755' : undefined,
+                    // Atomic update marker: client checks manifest FIRST
+                    is_skill_manifest: true,
+                    // SKILL.md content for version comparison (stored separately in .manifests/)
+                    skill_manifest_content: rawContent,
+                  });
+                }
+                
+                // 2. Remaining script files (client writes these ONLY if manifest changed)
+                for (let i = 1; i < scriptFiles.length; i++) {
+                  const scriptFile = scriptFiles[i];
+                  if (!scriptFile) continue;
                   
-                  // 2. Remaining script files (client writes these ONLY if manifest changed)
-                  for (let i = 1; i < metadata.script_files.length; i++) {
-                    const scriptFile = metadata.script_files[i];
-                    if (!scriptFile) continue;
-                    
-                    localActions.push({
-                      action: 'write_file',
-                      path: `${skillDir}/${scriptFile.relative_path}`,
-                      content: scriptFile.content,
-                      encoding: scriptFile.encoding ?? 'utf8',
-                      mode: scriptFile.mode,
-                    });
-                  }
+                  localActions.push({
+                    action: 'write_file',
+                    path: `${skillDir}/${scriptFile.path}`,
+                    content: scriptFile.content,
+                    encoding: 'utf8',
+                    mode: scriptFile.path.includes('/scripts/') ? '0755' : undefined,
+                  });
                 }
                 
                 logToolStep('sync_resources', 'Script files added to local_actions_required (SKILL.md excluded)', {
                   resourceId: sub.id,
-                  actionCount: metadata.script_files.length,
+                  actionCount: scriptFiles.length,
+                  source: 'API',
                 });
+              } else if (sourceFiles.length === 0) {
+                // Fallback: If API returned no files, try git scan
+                // (This handles the edge case where resources live only in git)
+                const metadata = await multiSourceGitManager.scanResourceMetadata(
+                  sub.name,
+                  sub.type
+                );
+                
+                if (metadata.has_scripts && metadata.script_files) {
+                  logToolStep('sync_resources', 'Complex skill detected (via Git) — generating local actions', {
+                    resourceId: sub.id,
+                    scriptCount: metadata.script_files.length,
+                    source: 'Git',
+                  });
+
+                  const skillDir = `${getCspAgentDirForClient('skills')}/${sub.name}`;
+                  
+                  if (metadata.script_files.length > 0) {
+                    const firstScript = metadata.script_files[0];
+                    if (!firstScript) {
+                      logger.warn({ resourceId: sub.id }, 'script_files[0] is undefined despite length > 0');
+                    } else {
+                      localActions.push({
+                        action: 'write_file',
+                        path: `${skillDir}/${firstScript.relative_path}`,
+                        content: firstScript.content,
+                        encoding: firstScript.encoding ?? 'utf8',
+                        mode: firstScript.mode,
+                        is_skill_manifest: true,
+                        skill_manifest_content: rawContent,
+                      });
+                    }
+                    
+                    for (let i = 1; i < metadata.script_files.length; i++) {
+                      const scriptFile = metadata.script_files[i];
+                      if (!scriptFile) continue;
+                      
+                      localActions.push({
+                        action: 'write_file',
+                        path: `${skillDir}/${scriptFile.relative_path}`,
+                        content: scriptFile.content,
+                        encoding: scriptFile.encoding ?? 'utf8',
+                        mode: scriptFile.mode,
+                      });
+                    }
+                  }
+                  
+                  logToolStep('sync_resources', 'Script files added to local_actions_required (SKILL.md excluded)', {
+                    resourceId: sub.id,
+                    actionCount: metadata.script_files.length,
+                    source: 'Git',
+                  });
+                } else {
+                  logToolStep('sync_resources', 'Simple skill — no local files needed', {
+                    resourceId: sub.id,
+                  });
+                }
               } else {
+                // API returned files, but they're all markdown (simple skill)
                 logToolStep('sync_resources', 'Simple skill — no local files needed', {
                   resourceId: sub.id,
                 });
