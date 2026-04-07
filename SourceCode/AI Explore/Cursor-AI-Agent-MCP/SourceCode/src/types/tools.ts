@@ -98,11 +98,26 @@ export interface RemoveMcpJsonEntryAction {
   server_name: string;
 }
 
+export interface CheckFileAction {
+  action: 'check_file';
+  /** Absolute path on the user's local machine to check (may start with ~). */
+  path: string;
+  /** Expected file content from remote server. */
+  expected_content: string;
+  /** Resource ID for tracking which resource this check belongs to. */
+  resource_id: string;
+  /** Resource name for user-friendly reporting. */
+  resource_name: string;
+  /** Resource type (rule or mcp). */
+  resource_type: string;
+}
+
 export type LocalAction =
   | WriteFileAction
   | DeleteFileAction
   | MergeMcpJsonAction
-  | RemoveMcpJsonEntryAction;
+  | RemoveMcpJsonEntryAction
+  | CheckFileAction;
 
 // Tool Handler Function Type (generic, accepts any params and returns any result)
 export type ToolHandler = (params: unknown) => Promise<ToolResult>;

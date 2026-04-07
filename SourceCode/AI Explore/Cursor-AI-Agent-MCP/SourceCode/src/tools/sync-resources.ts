@@ -26,6 +26,7 @@ import {
   getCursorTypeDirForClient,
   getCursorRootDirForClient,
   getCspAgentDirForClient,
+  getCspAgentRootDirForClient,
 } from '../utils/cursor-paths';
 import { MCPServerError } from '../types/errors';
 import type {
@@ -196,7 +197,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
 
         // In check mode: report whether the resource is already available.
         // Command/Skill: check the in-memory Prompt registry (no local files).
-        // Rule/MCP: check whether the local file / mcp.json entry exists.
+        // Rule/MCP: fetch remote content and queue check actions for AI Agent to compare.
         if (mode === 'check') {
           if (sub.type === 'command' || sub.type === 'skill') {
             const meta = {
@@ -210,24 +211,163 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             if (isRegistered) {
               tally.cached++;
               details.push({ id: sub.id, name: sub.name, action: 'cached', version: resourceVersion });
+              
+              // ── ADDITIONAL: Check if skill has local scripts in .csp-ai-agent ────
+              // Complex skills store scripts in ~/.csp-ai-agent/skills/<name>/
+              // We need to verify those are also up-to-date
+              if (sub.type === 'skill') {
+                try {
+                  const metadata = await multiSourceGitManager.scanResourceMetadata(sub.name, sub.type);
+                  if (metadata.has_scripts && metadata.script_files) {
+                    logToolStep('sync_resources', 'Skill has scripts — generating script check actions', {
+                      resourceId: sub.id,
+                      scriptCount: metadata.script_files.length,
+                    });
+                    
+                    // Check each script file in .csp-ai-agent
+                    const skillDir = `${getCspAgentDirForClient('skills')}/${sub.name}`;
+                    for (const scriptFile of metadata.script_files) {
+                      localActions.push({
+                        action: 'check_file',
+                        path: `${skillDir}/${scriptFile.relative_path}`,
+                        expected_content: scriptFile.content,
+                        resource_id: sub.id,
+                        resource_name: sub.name,
+                        resource_type: sub.type,
+                      });
+                    }
+                    
+                    // Also check the manifest file
+                    localActions.push({
+                      action: 'check_file',
+                      path: `${getCspAgentRootDirForClient()}/.manifests/${sub.name}.md`,
+                      expected_content: metadata.script_files[0]?.content ?? '',  // Use first script as proxy
+                      resource_id: sub.id,
+                      resource_name: sub.name,
+                      resource_type: sub.type,
+                    });
+                  }
+                } catch {
+                  // No scripts or scan failed — skip script check
+                }
+              }
             } else {
               tally.failed++;
               details.push({ id: sub.id, name: sub.name, action: 'failed', version: resourceVersion });
             }
           } else {
+            // ── Rule/MCP: delegate to AI Agent for local file comparison ────────
+            // MCP Server cannot access user's local filesystem directly.
+            // Fetch remote content, generate check_file action, let AI compare.
             try {
-              await fs.access(destPath);
-              tally.cached++;
-              details.push({ id: sub.id, name: sub.name, action: 'cached', version: resourceVersion });
-              logToolStep('sync_resources', 'Resource already present (check mode)', {
-                resourceId: sub.id, destPath,
+              logToolStep('sync_resources', 'Downloading resource for check', {
+                resourceId: sub.id,
+                resourceType: sub.type,
               });
-            } catch {
+              const tDl = Date.now();
+              const downloadResult = await apiClient.downloadResource(sub.id, userToken);
+              logToolStep('sync_resources', 'Download complete (check mode)', {
+                resourceId: sub.id,
+                fileCount: downloadResult.files.length,
+                duration: Date.now() - tDl,
+              });
+
+              let resourceFiles = downloadResult.files;
+              if (resourceFiles.length === 0) {
+                const gitType = sub.type as 'command' | 'skill' | 'rule' | 'mcp';
+                resourceFiles = await multiSourceGitManager.readResourceFiles(sub.name, gitType);
+                if (resourceFiles.length === 0) {
+                  logger.warn(
+                    { resourceId: sub.id, resourceName: sub.name },
+                    'No files found for check mode — marking as failed',
+                  );
+                  tally.failed++;
+                  details.push({ id: sub.id, name: sub.name, action: 'failed', version: resourceVersion });
+                  continue;
+                }
+              }
+
+              // Generate check_file actions for AI Agent to compare local files
+              // CRITICAL: Respect scope parameter and check ALL relevant paths
+              //   - scope='global': check ~/.cursor/rules only
+              //   - scope='workspace': check .cursor/rules only  
+              //   - scope='all': check BOTH paths independently
+              //   - Windows: prioritize workspace check (user's active location)
+              //   - macOS: prioritize global check (standard location)
+              
+              for (const file of resourceFiles) {
+                const normalised = path.normalize(file.path);
+                if (normalised.startsWith('..')) continue;
+
+                if (sub.type === 'rule') {
+                  // Rule resources: check based on scope parameter
+                  const checkPaths: string[] = [];
+                  
+                  if (scope === 'global' || scope === 'all') {
+                    checkPaths.push(`${getCursorTypeDirForClient(sub.type)}/${normalised}`);  // ~/.cursor/rules/
+                  }
+                  if (scope === 'workspace' || scope === 'all') {
+                    checkPaths.push(`.cursor/rules/${normalised}`);  // workspace-relative
+                  }
+                  
+                  // Generate check_file action for EACH path
+                  for (const checkPath of checkPaths) {
+                    localActions.push({
+                      action: 'check_file',
+                      path: checkPath,
+                      expected_content: file.content,
+                      resource_id: sub.id,
+                      resource_name: sub.name,
+                      resource_type: sub.type,
+                    });
+                  }
+                  
+                } else if (sub.type === 'mcp') {
+                  // MCP resources: check if mcp.json entry exists
+                  const mcpJsonPath = `${getCursorRootDirForClient()}/mcp.json`;
+                  localActions.push({
+                    action: 'check_file',
+                    path: mcpJsonPath,
+                    expected_content: file.content,
+                    resource_id: sub.id,
+                    resource_name: sub.name,
+                    resource_type: sub.type,
+                  });
+                  
+                } else {
+                  // Fallback for unknown types
+                  const checkPath = destPath;
+                  localActions.push({
+                    action: 'check_file',
+                    path: checkPath,
+                    expected_content: file.content,
+                    resource_id: sub.id,
+                    resource_name: sub.name,
+                    resource_type: sub.type,
+                  });
+                }
+              }
+
+              // Placeholder: AI will update this after executing check actions
+              tally.cached++;
+              details.push({
+                id: sub.id,
+                name: sub.name,
+                action: 'cached',
+                version: resourceVersion,
+              });
+
+              logToolStep('sync_resources', 'Check actions queued for AI Agent', {
+                resourceId: sub.id,
+                actionCount: resourceFiles.length,
+              });
+            } catch (checkErr) {
+              logger.error(
+                { resourceId: sub.id, error: (checkErr as Error).message },
+                'Failed to prepare check actions',
+              );
               tally.failed++;
               details.push({ id: sub.id, name: sub.name, action: 'failed', version: resourceVersion });
-              logToolStep('sync_resources', 'Resource missing (check mode)', {
-                resourceId: sub.id, destPath,
-              });
             }
           }
           continue;
@@ -937,7 +1077,17 @@ export const syncResourcesTool = {
     '      in ~/.cursor/mcp.json, SKIP this action entirely — the server is already configured ' +
     '      and any user-edited env values must not be overwritten. ' +
     '  (2) Otherwise read the existing ~/.cursor/mcp.json, smart-merge the provided entry ' +
-    '      (preserve existing user env values), then write the file back.',
+    '      (preserve existing user env values), then write the file back. ' +
+    'For check_file actions (check mode only): ' +
+    '  (1) Read the local file at `path` (if it exists). ' +
+    '  (2) Compare the local file content directly (string equality) against the `expected_content` field. ' +
+    '  (3) Report the check result: ' +
+    '      - "match" if content is identical (resource is up-to-date). ' +
+    '      - "mismatch" if content differs (resource needs updating). ' +
+    '      - "missing" if the local file does not exist (resource needs installation). ' +
+    '  (4) Aggregate all check results and update the sync_resources response: ' +
+    '      - If ALL files match → report resource as "cached". ' +
+    '      - If ANY file mismatches or is missing → report resource as "failed" (needs sync).',
   inputSchema: {
     type: 'object' as const,
     properties: {
