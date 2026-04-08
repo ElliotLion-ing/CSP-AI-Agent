@@ -1054,6 +1054,95 @@ for (const action of result.local_actions_required || []) {
 
 ---
 
+## 9. 查询当前用户使用明细
+
+返回当前登录用户的资源调用统计，无需分页，一次性返回所有资源的调用明细。用户身份从 Token 上下文自动获取。
+
+- **URL**: `GET /csp/api/mcp-telemetry/my-usage`
+- **认证**: 需要（`Authorization: Bearer {user_token}`）
+
+### Query Parameters
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| resource_type | String | 否 | — | 按资源类型过滤 (command / skill / rule / mcp)，不传则统计所有类型 |
+| start_date | String | 否 | — | 起始日期 (yyyy-MM-dd)，仅过滤遥测事件时间范围 |
+| end_date | String | 否 | — | 结束日期 (yyyy-MM-dd)，仅过滤遥测事件时间范围 |
+
+### Request Example
+
+```
+GET /csp/api/mcp-telemetry/my-usage?resource_type=skill&start_date=2026-03-01&end_date=2026-03-31
+Authorization: Bearer {token}
+```
+
+### Response — Success (200)
+
+```json
+{
+  "code": 2000,
+  "result": "success",
+  "data": {
+    "user_id": 101,
+    "user_name": "Dev User",
+    "user_email": "dev@example.com",
+    "total_invocations": 45,
+    "resource_usage": [
+      {
+        "resource_id": "zNet-cmd-001",
+        "resource_name": "debug-network",
+        "resource_type": "command",
+        "invocation_count": 30
+      },
+      {
+        "resource_id": "Client-Public-skill-003",
+        "resource_name": "code-review",
+        "resource_type": "skill",
+        "invocation_count": 15
+      }
+    ]
+  }
+}
+```
+
+### Response 字段说明
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| user_id | Integer | 当前用户 ID |
+| user_name | String | 用户名称 |
+| user_email | String | 用户邮箱 |
+| total_invocations | Long | 总调用次数 |
+| resource_usage | Array | 各资源调用明细列表，按调用次数降序排列 |
+| resource_usage[].resource_id | String | 资源 ID |
+| resource_usage[].resource_name | String | 资源名称 |
+| resource_usage[].resource_type | String | 资源类型 |
+| resource_usage[].invocation_count | Long | 该资源的调用次数 |
+
+### Response — 认证失败 (401)
+
+```json
+{
+  "code": 4010,
+  "result": "invalid or expired token",
+  "data": null
+}
+```
+
+### Response — 参数错误 (400)
+
+```json
+{
+  "code": 4000,
+  "result": "Illegal param",
+  "data": {
+    "error": "Invalid date format. Expected yyyy-MM-dd"
+  }
+}
+```
+
+---
+
 ## 混合同步架构总览（v2.0+）
 
 ### 资源分发策略

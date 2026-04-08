@@ -24,7 +24,7 @@ class APIClient {
       timeout: config.csp.timeout,
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': `csp-ai-agent-mcp/0.2.0`,
+        'User-Agent': `csp-ai-agent-mcp/0.2.5`,
       },
     });
 
@@ -682,6 +682,74 @@ class APIClient {
       payload,
       this.authConfig(userToken)
     );
+  }
+
+  /**
+   * Query current user's resource usage statistics.
+   *
+   * GET /csp/api/mcp-telemetry/my-usage?resource_type=...&start_date=...&end_date=...
+   *
+   * Returns aggregated usage data for the authenticated user, sorted by invocation count descending.
+   * User identity is automatically derived from the Authorization token.
+   *
+   * @param params.resource_type Optional filter: 'command', 'skill', 'rule', or 'mcp'
+   * @param params.start_date    Optional start date (yyyy-MM-dd format)
+   * @param params.end_date      Optional end date (yyyy-MM-dd format)
+   * @param userToken            Per-request Bearer token from the caller's mcp.json configuration
+   * @returns Usage statistics including user info and resource usage list
+   */
+  async getMyUsageStats(
+    params: {
+      resource_type?: string;
+      start_date?: string;
+      end_date?: string;
+    },
+    userToken?: string
+  ): Promise<{
+    code: number;
+    result: string;
+    data: {
+      user_id: number;
+      user_name: string;
+      user_email: string;
+      total_invocations: number;
+      resource_usage: Array<{
+        resource_id: string;
+        resource_name: string;
+        resource_type: string;
+        invocation_count: number;
+      }>;
+    };
+  }> {
+    const queryParams = new URLSearchParams();
+    if (params.resource_type) {
+      queryParams.set('resource_type', params.resource_type);
+    }
+    if (params.start_date) {
+      queryParams.set('start_date', params.start_date);
+    }
+    if (params.end_date) {
+      queryParams.set('end_date', params.end_date);
+    }
+
+    const url = `/csp/api/mcp-telemetry/my-usage${queryParams.toString() ? `?${queryParams.toString()}` : ''}`;
+    
+    return await this.get<{
+      code: number;
+      result: string;
+      data: {
+        user_id: number;
+        user_name: string;
+        user_email: string;
+        total_invocations: number;
+        resource_usage: Array<{
+          resource_id: string;
+          resource_name: string;
+          resource_type: string;
+          invocation_count: number;
+        }>;
+      };
+    }>(url, this.authConfig(userToken));
   }
 
   /**

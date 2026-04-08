@@ -10,4 +10,5 @@ export * from './upload-resource';
 export * from './uninstall-resource';
 export * from './track-usage';
 export * from './resolve-prompt-content';
+export * from './query-usage-stats';
 export * from './registry';

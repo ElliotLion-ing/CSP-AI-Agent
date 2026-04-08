@@ -20,6 +20,7 @@ import {
   uninstallResourceTool,
   trackUsageTool,
   resolvePromptContentTool,
+  queryUsageStatsTool,
 } from './tools';
 import { httpServer } from './server/http';
 
@@ -38,6 +39,7 @@ function registerTools() {
   toolRegistry.registerTool(uninstallResourceTool);
   toolRegistry.registerTool(trackUsageTool);
   toolRegistry.registerTool(resolvePromptContentTool);
+  toolRegistry.registerTool(queryUsageStatsTool);
 
   logger.info(
     { toolCount: toolRegistry.getToolCount() },
@@ -55,7 +57,7 @@ async function startStdioServer(): Promise<void> {
   server = new Server(
     {
       name: 'csp-ai-agent-mcp',
-      version: '0.2.0',
+      version: '0.2.5',
     },
     {
       capabilities: {

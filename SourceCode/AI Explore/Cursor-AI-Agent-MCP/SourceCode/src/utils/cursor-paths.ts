@@ -190,21 +190,6 @@ export function getCursorResourcePath(resourceType: string, resourceName: string
   return path.join(getCursorTypeDir(resourceType), resourceName);
 }
 
-/**
- * Returns the path to the local AI resource telemetry file.
- *
- * Stored at the Cursor root level (not inside a resource-type subdirectory)
- * so it persists independently of individual resource installs/uninstalls.
- *
- * All platforms: <USER_HOME>/.cursor/ai-resource-telemetry.json
- * Windows: C:\Users\<Username>\.cursor\ai-resource-telemetry.json
- * macOS:   /Users/<user>/.cursor/ai-resource-telemetry.json
- * Linux:   /home/<user>/.cursor/ai-resource-telemetry.json
- */
-export function getTelemetryFilePath(): string {
-  return path.join(getCursorRootDir(), 'ai-resource-telemetry.json');
-}
-
 // ============================================================================
 // CSP AI Agent Isolated Storage Paths
 // ============================================================================
