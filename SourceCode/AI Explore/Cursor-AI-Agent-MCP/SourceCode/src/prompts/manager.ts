@@ -27,6 +27,9 @@ import { logger } from '../utils/logger.js';
 import { telemetry } from '../telemetry/index.js';
 import type { LocalAction } from '../types/tools.js';
 
+// Notification method name as defined in MCP spec
+const PROMPTS_LIST_CHANGED = 'notifications/prompts/list_changed';
+
 export interface PromptResourceMeta {
   /** Canonical resource ID from the CSP platform (e.g. "cmd-client-sdk-001"). */
   resource_id: string;
@@ -67,6 +70,15 @@ export class PromptManager {
   private readonly userPrompts = new Map<string, Map<string, RegisteredPrompt>>();
 
   /**
+   * Per-user active Server instances: userToken → Set<Server>.
+   *
+   * Populated by installHandlers() and used to send prompts/list_changed
+   * notifications when new prompts are registered mid-session (e.g. after
+   * manage_subscription subscribe + auto-sync).
+   */
+  private readonly userServers = new Map<string, Set<Server>>();
+
+  /**
    * Per-user cache of the most recent local_actions_required from sync_resources.
    *
    * Populated by storeSyncActions() after each background sync on connect.
@@ -84,6 +96,48 @@ export class PromptManager {
    * subsequent connections and cause "Method not found" errors).
    */
   private readonly installedServers = new WeakSet<Server>();
+
+  /** Return (or lazily create) the Server Set for a given user token. */
+  private serversFor(userToken: string): Set<Server> {
+    let set = this.userServers.get(userToken);
+    if (!set) {
+      set = new Set();
+      this.userServers.set(userToken, set);
+    }
+    return set;
+  }
+
+  /**
+   * Send prompts/list_changed notification to all active Server instances for
+   * the given user.  This tells the connected MCP client (e.g. Cursor) to
+   * refresh its prompt list immediately without requiring a reconnect.
+   *
+   * Fires-and-forgets — individual notification failures are logged but do not
+   * propagate, since the worst outcome is the client not refreshing until the
+   * next reconnect.
+   */
+  private notifyPromptsChanged(userToken: string): void {
+    const servers = this.userServers.get(userToken);
+    if (!servers || servers.size === 0) return;
+
+    for (const server of servers) {
+      // Use the MCP SDK's sendNotification to push prompts/list_changed
+      server.notification({ method: PROMPTS_LIST_CHANGED }).catch((err: unknown) => {
+        logger.warn(
+          { error: err instanceof Error ? err.message : String(err) },
+          'PromptManager: failed to send prompts/list_changed notification',
+        );
+      });
+    }
+
+    logger.info(
+      {
+        userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
+        serverCount: servers.size,
+      },
+      'PromptManager: sent prompts/list_changed notification to active connections',
+    );
+  }
 
   /** Return (or lazily create) the prompt Map for a given user token. */
   private promptsFor(userToken: string): Map<string, RegisteredPrompt> {
@@ -278,6 +332,22 @@ export class PromptManager {
   installHandlers(server: Server, userToken?: string): void {
     if (this.installedServers.has(server)) return;
     this.installedServers.add(server);
+
+    // Track this Server instance so we can push prompts/list_changed later.
+    const token = userToken ?? '';
+    this.serversFor(token).add(server);
+
+    // Clean up when the SSE transport closes so we don't hold a reference to
+    // a dead Server and attempt to send notifications to it.
+    const originalOnClose = (server as unknown as { onclose?: () => void }).onclose;
+    (server as unknown as { onclose?: () => void }).onclose = () => {
+      this.serversFor(token).delete(server);
+      logger.debug(
+        { userTokenPrefix: token ? `${token.slice(0, 12)}...` : 'anonymous' },
+        'PromptManager: removed closed server from active set',
+      );
+      if (typeof originalOnClose === 'function') originalOnClose();
+    };
 
     // List prompts for THIS connection's user only.
     // A fixed setup prompt is always injected at the top of the list so that
@@ -585,6 +655,7 @@ export class PromptManager {
     }
 
     const userMap = this.promptsFor(userToken);
+    const isNewPrompt = !userMap.has(name);
     userMap.set(name, {
       name,
       description: meta.description,
@@ -597,9 +668,18 @@ export class PromptManager {
         resourceId: meta.resource_id,
         userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
         userPromptCount: userMap.size,
+        isNewPrompt,
       },
       'Prompt registered for user',
     );
+
+    // Notify connected MCP clients (e.g. Cursor) that the prompt list has
+    // changed so they refresh immediately without requiring a reconnect.
+    // Only fire for genuinely new prompts — refreshing existing ones does not
+    // change the list from the client's perspective.
+    if (isNewPrompt) {
+      this.notifyPromptsChanged(userToken);
+    }
   }
 
   /**

@@ -76,6 +76,13 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           }
         }
 
+        // Build per-resource sync hint so the AI knows to use resource_ids
+        // for a scoped incremental sync instead of syncing all resources.
+        const subscribedIds = subResult.subscriptions.map(s => s.id);
+        const syncHint = subscribedIds.length > 0
+          ? `To sync ONLY the newly subscribed resource(s), call: sync_resources(mode="incremental", resource_ids=${JSON.stringify(subscribedIds)}). This avoids returning local_actions for ALL subscribed resources and drastically reduces context overhead.`
+          : undefined;
+
         result = {
           action: 'subscribe',
           success: true,
@@ -88,6 +95,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           message: [
             `Successfully subscribed to ${subResult.subscriptions.length} resource${subResult.subscriptions.length > 1 ? 's' : ''}.`,
             syncSummary,
+            syncHint,
             'If you need to execute a newly subscribed Command or Skill in this same conversation, call resolve_prompt_content next to retrieve the real prompt body.',
           ].filter(Boolean).join(' '),
           ...(syncDetails ? { sync_details: syncDetails } : {}),
