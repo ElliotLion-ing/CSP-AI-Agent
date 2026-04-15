@@ -30,6 +30,10 @@ import type { LocalAction } from '../types/tools.js';
 // Notification method name as defined in MCP spec
 const PROMPTS_LIST_CHANGED = 'notifications/prompts/list_changed';
 
+// Lazy import to avoid circular dependency: sync-resources → prompts/manager → sync-resources
+// We import the function type only and resolve at call-time.
+type SyncResourcesFn = (params: unknown) => Promise<unknown>;
+
 export interface PromptResourceMeta {
   /** Canonical resource ID from the CSP platform (e.g. "cmd-client-sdk-001"). */
   resource_id: string;
@@ -77,6 +81,27 @@ export class PromptManager {
    * manage_subscription subscribe + auto-sync).
    */
   private readonly userServers = new Map<string, Set<Server>>();
+
+  /**
+   * Per-user recovery-sync lock.
+   *
+   * Prevents multiple concurrent recovery syncs for the same user when
+   * ListPrompts is called rapidly while the server just restarted and
+   * the in-memory prompt store is empty.
+   */
+  private readonly recoveringSyncUsers = new Set<string>();
+
+  /**
+   * Injected sync function used for post-restart recovery.
+   * Set by http.ts after both modules are initialised to break the circular
+   * dependency between sync-resources ↔ prompts/manager.
+   */
+  private syncResourcesFn: SyncResourcesFn | null = null;
+
+  /** Called once from http.ts to inject the sync function. */
+  setSyncResourcesFn(fn: SyncResourcesFn): void {
+    this.syncResourcesFn = fn;
+  }
 
   /**
    * Per-user cache of the most recent local_actions_required from sync_resources.
@@ -367,6 +392,59 @@ export class PromptManager {
           },
         ],
       }));
+
+      // ── Post-restart recovery ───────────────────────────────────────────────
+      // When the MCP server restarts, its in-memory prompt store is wiped.
+      // Cursor reuses the existing SSE connection and never re-triggers
+      // oninitialized, so syncResources never runs and prompts stay empty.
+      //
+      // Detection: userMap is empty (no resource prompts registered) AND a sync
+      // function is available AND we are not already recovering for this user.
+      //
+      // Action: fire a background syncResources call (full subscription list,
+      // no resource_ids filter so all prompts are re-registered), then push a
+      // prompts/list_changed notification so Cursor refreshes automatically.
+      if (resourcePrompts.length === 0 && this.syncResourcesFn && !this.recoveringSyncUsers.has(token)) {
+        this.recoveringSyncUsers.add(token);
+        logger.info(
+          { userTokenPrefix: token ? `${token.slice(0, 12)}...` : 'anonymous' },
+          'PromptManager: empty prompt store detected on ListPrompts — triggering post-restart recovery sync',
+        );
+        void this.syncResourcesFn({ mode: 'incremental', scope: 'global', user_token: token })
+          .then((result: unknown) => {
+            this.recoveringSyncUsers.delete(token);
+
+            // Cache any local_actions_required (Rule files, MCP entries) so they
+            // are delivered to the AI the next time it calls GetPrompt for
+            // csp-ai-agent-setup — identical to what oninitialized does.
+            // This is safe: local_actions are NOT returned to the AI directly here
+            // (we are inside a ListPrompts handler, not a tool call), so the user's
+            // context window is completely unaffected.
+            const syncResult = result as { success?: boolean; data?: { local_actions_required?: unknown[] } };
+            const actions = syncResult?.data?.local_actions_required;
+            if (Array.isArray(actions) && actions.length > 0) {
+              this.storeSyncActions(token, actions as LocalAction[]);
+              logger.info(
+                { actionCount: actions.length, userTokenPrefix: token ? `${token.slice(0, 12)}...` : 'anonymous' },
+                'PromptManager: recovery sync cached local_actions_required for next csp-ai-agent-setup call',
+              );
+            }
+
+            // Notify Cursor that the prompt list has been repopulated.
+            this.notifyPromptsChanged(token);
+            logger.info(
+              { userTokenPrefix: token ? `${token.slice(0, 12)}...` : 'anonymous' },
+              'PromptManager: post-restart recovery sync completed — prompts/list_changed sent',
+            );
+          })
+          .catch((err: unknown) => {
+            this.recoveringSyncUsers.delete(token);
+            logger.error(
+              { error: err instanceof Error ? err.message : String(err) },
+              'PromptManager: post-restart recovery sync failed',
+            );
+          });
+      }
 
       const setupPrompt = {
         name: 'csp-ai-agent-setup',

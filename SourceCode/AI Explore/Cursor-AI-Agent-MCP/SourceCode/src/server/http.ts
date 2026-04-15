@@ -16,6 +16,10 @@ import {
 import { syncResources } from '../tools/sync-resources.js';
 import { telemetry } from '../telemetry/index.js';
 import { promptManager } from '../prompts/index.js';
+
+// Inject syncResources into promptManager for post-restart recovery.
+// Must be done after both modules are loaded to avoid circular-import issues.
+promptManager.setSyncResourcesFn(syncResources);
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { sessionManager } from '../session/manager';
