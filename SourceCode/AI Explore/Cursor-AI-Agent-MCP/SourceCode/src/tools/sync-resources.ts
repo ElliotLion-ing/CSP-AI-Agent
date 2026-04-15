@@ -1043,9 +1043,19 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
     // Remove any prompt registered in a previous session that is no longer in
     // the current subscription list.  This prevents prompt count from growing
     // unboundedly across reconnections.
-    // In 'check' mode we skip pruning — we never registered any prompts above.
-    if (mode !== 'check') {
+    //
+    // IMPORTANT: Skip pruning when resource_ids filter is active.
+    // When syncing a subset of resources, expectedPromptNames only contains
+    // the names of those resources — pruning would incorrectly delete all
+    // other registered prompts that are still valid subscriptions.
+    // Pruning is only safe when we've processed the FULL subscription list.
+    if (mode !== 'check' && !resourceIds) {
       promptManager.pruneStalePrompts(expectedPromptNames, userToken ?? '');
+    } else if (resourceIds) {
+      logger.info(
+        { resourceIdsFilter: [...resourceIds], expectedPromptCount: expectedPromptNames.size },
+        'sync_resources: skipping pruneStalePrompts — resource_ids filter active (partial sync)',
+      );
     }
 
     // ── Step 5: Health score ───────────────────────────────────────────────

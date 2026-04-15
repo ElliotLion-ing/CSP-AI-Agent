@@ -697,6 +697,7 @@ export class PromptManager {
   ): void {
     const name = this.buildPromptName({ resource_type: resourceType, resource_name: resourceName });
     const userMap = this.promptsFor(userToken);
+    const wasRegistered = userMap.has(name);
     userMap.delete(name);
     // Only delete the cache file if no other user has this same resource registered.
     const stillInUse = Array.from(this.userPrompts.values()).some((m) => m.has(name));
@@ -708,9 +709,16 @@ export class PromptManager {
         promptName: name,
         resourceId,
         userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
+        wasRegistered,
       },
       'Prompt unregistered for user',
     );
+
+    // Notify connected MCP clients that the prompt list has changed so Cursor
+    // removes the prompt immediately without requiring a reconnect.
+    if (wasRegistered) {
+      this.notifyPromptsChanged(userToken);
+    }
   }
 
   /**
@@ -807,6 +815,8 @@ export class PromptManager {
         },
         'PromptManager: pruned stale prompts for user',
       );
+      // Notify connected clients so Cursor removes the stale prompts immediately.
+      this.notifyPromptsChanged(userToken);
     } else {
       logger.info(
         {

@@ -1,6 +1,6 @@
 {
   "name": "@elliotding/ai-agent-mcp",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "CSP AI Agent MCP Server - Centralized AI tools distribution and management",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
