@@ -117,13 +117,19 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
 
         logger.debug({ resourceIds: typedParams.resource_ids }, 'Unsubscribing from resources...');
 
-        // Build a resource_id → type map from the current subscription list so
-        // uninstall actions can be scoped precisely to rule vs mcp resources.
+        // Build resource_id → type and resource_id → name maps from the current
+        // subscription list so uninstall actions can be scoped precisely to
+        // rule vs mcp resources, and the correct server_name (e.g. "acm") is
+        // used in remove_mcp_json_entry instead of the raw UUID.
         const idToType: Map<string, string> = new Map();
+        const idToName: Map<string, string> = new Map();
         try {
           const currentSubs = await apiClient.getSubscriptions({}, typedParams.user_token);
           for (const s of currentSubs.subscriptions) {
             idToType.set(s.id, s.type);
+            if (s.name) {
+              idToName.set(s.id, s.name);
+            }
           }
         } catch (e) {
           logger.warn({ error: (e as Error).message }, 'Could not fetch subscriptions for type resolution — uninstall will emit both rule+mcp actions as fallback');
@@ -178,19 +184,28 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             uninstallResults.push({ id: resourceId, removed: true, detail: `Unregistered MCP Prompt for "${resourceName}"` });
             continue;
           }
-          // Use the last segment of the resource ID as the search pattern
-          // e.g. "mcp-client-sdk-ai-hub-jenkins" → "jenkins"
-          //      "rule-csp-elliotTest"            → "elliotTest"
-          const namePart = resourceId.split('-').slice(-1)[0] ||
-                           resourceId.split('-').slice(-2).join('-') ||
-                           resourceId;
-
-          // Try full name match first (e.g. "elliotTest"), fallback to last segment
-          const patternsToTry = Array.from(new Set([
-            resourceId,                                   // full id
-            resourceId.replace(/^(skill|cmd|rule|mcp)-[^-]+-/, ''), // strip prefix+source
-            namePart,
-          ]));
+          // Prefer the human-readable name from the subscription list (e.g. "acm")
+          // over deriving a pattern from the raw UUID.  Falling back to UUID-based
+          // heuristics only when the subscription name is unavailable.
+          const subscribedName = idToName.get(resourceId);
+          let patternsToTry: string[];
+          if (subscribedName) {
+            // Use the actual resource name as the primary pattern; keep the UUID
+            // as a secondary fallback in case the uninstall tool needs it.
+            patternsToTry = Array.from(new Set([subscribedName, resourceId]));
+          } else {
+            // Legacy fallback: derive a name from prefixed IDs like
+            // "mcp-client-sdk-ai-hub-jenkins" → "jenkins"
+            // "rule-csp-elliotTest"            → "elliotTest"
+            const namePart = resourceId.split('-').slice(-1)[0] ||
+                             resourceId.split('-').slice(-2).join('-') ||
+                             resourceId;
+            patternsToTry = Array.from(new Set([
+              resourceId,
+              resourceId.replace(/^(skill|cmd|rule|mcp)-[^-]+-/, ''),
+              namePart,
+            ]));
+          }
 
           const resolvedType = idToType.get(resourceId) as 'rule' | 'mcp' | undefined;
           let uninstalled = false;
