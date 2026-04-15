@@ -167,6 +167,34 @@ export interface SyncResourcesParams {
    * Only applies in 'incremental' mode; 'full' mode always downloads everything.
    */
   configured_mcp_servers?: string[];
+  /**
+   * Optional list of specific resource IDs to sync.
+   *
+   * When provided, only the subscribed resources whose IDs are in this array
+   * will be fetched and processed. `local_actions_required` will contain only
+   * actions for those resources, dramatically reducing context overhead when
+   * the caller only needs to sync one or a few resources (e.g. after subscribing
+   * to a single new resource).
+   *
+   * When omitted, all subscribed resources are processed (existing behaviour).
+   *
+   * Also bypasses the full-sync confirmation guard — a scoped full sync on
+   * specific resources does not require `_confirmed_full_sync`.
+   */
+  resource_ids?: string[];
+  /**
+   * Confirmation flag required when calling with mode='full' and no resource_ids.
+   *
+   * A full sync without resource scoping downloads and generates local_actions
+   * for every subscribed resource, which can consume a large portion of the
+   * agent's context window (potentially 100 KB+). To prevent accidental context
+   * saturation, the server returns FULL_SYNC_REQUIRES_CONFIRMATION when this
+   * flag is absent or false.
+   *
+   * The AI agent should surface the warning to the user and, upon confirmation,
+   * retry the call with `_confirmed_full_sync: true`.
+   */
+  _confirmed_full_sync?: boolean;
 }
 
 export interface McpSetupItem {

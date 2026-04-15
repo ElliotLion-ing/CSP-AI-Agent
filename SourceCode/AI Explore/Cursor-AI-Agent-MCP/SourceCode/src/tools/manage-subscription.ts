@@ -53,10 +53,14 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
 
         if (shouldAutoSync && subResult.subscriptions.length > 0) {
           logger.info({ resourceIds: typedParams.resource_ids }, 'Auto-syncing newly subscribed resources...');
+          // Scope auto-sync to only the newly subscribed resource(s).
+          // Passing resource_ids prevents processing all other subscribed resources,
+          // which would generate unnecessary local_actions and waste context window.
           const syncResult = await syncResources({
             mode: 'incremental',
             scope: typedParams.scope || 'global',
             user_token: typedParams.user_token,
+            resource_ids: typedParams.resource_ids,
           });
           if (syncResult.success && syncResult.data) {
             const sd = syncResult.data;

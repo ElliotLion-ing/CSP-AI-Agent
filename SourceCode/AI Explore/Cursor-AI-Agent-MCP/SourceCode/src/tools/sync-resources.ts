@@ -104,27 +104,81 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
     const types     = typedParams.types;
     const userToken = typedParams.user_token;
     const configuredMcpServers = new Set(typedParams.configured_mcp_servers || []);
+    const resourceIds  = typedParams.resource_ids && typedParams.resource_ids.length > 0
+      ? new Set(typedParams.resource_ids)
+      : null;
+    const confirmedFullSync = typedParams._confirmed_full_sync === true;
 
     logToolStep('sync_resources', 'Parameters validated', { 
       mode, 
       scope, 
       types,
       configuredMcpCount: configuredMcpServers.size,
+      resourceIdsFilter: resourceIds ? [...resourceIds] : null,
+      confirmedFullSync,
     });
+
+    // ── Full-mode confirmation guard ────────────────────────────────────────
+    // When mode='full' is requested without resource_ids scoping AND without
+    // explicit user confirmation, refuse to proceed. A full sync downloads and
+    // generates local_actions for every subscribed resource, which can occupy
+    // 100 KB+ of the agent's context window. Callers must surface the warning
+    // to the user and retry with _confirmed_full_sync: true.
+    if (mode === 'full' && !resourceIds && !confirmedFullSync) {
+      logger.warn(
+        { tool: 'sync_resources', mode },
+        'Full sync requested without confirmation — returning FULL_SYNC_REQUIRES_CONFIRMATION',
+      );
+      return {
+        success: false,
+        error: {
+          code: 'FULL_SYNC_REQUIRES_CONFIRMATION',
+          message:
+            '⚠️ Full sync will process ALL subscribed resources and return local_actions for all of them. ' +
+            'This may consume a large portion of the context window (potentially 100 KB+ of data). ' +
+            'Incremental sync is recommended unless you specifically need to refresh every resource. ' +
+            'To proceed, retry with _confirmed_full_sync: true after obtaining user confirmation.',
+          details: {
+            requires_confirmation: true,
+            warning:
+              'Full sync returns local_actions for ALL resources (potentially 100 KB+ context). ' +
+              'Incremental mode is recommended.',
+            suggestion: 'Use mode="incremental" or provide resource_ids to scope the sync.',
+          },
+        },
+      };
+    }
 
     // ── Step 1: Fetch subscription list ────────────────────────────────────
     logToolStep('sync_resources', 'Step 1: Fetching subscriptions from API', { scope, types });
     const t1 = Date.now();
 
-    const subscriptions = await apiClient.getSubscriptions({ types }, userToken);
+    const allSubscriptions = await apiClient.getSubscriptions({ types }, userToken);
+
+    // Apply resource_ids filter if provided — only process the specified resources.
+    // This is done client-side: the subscription list API has no resource_ids filter,
+    // but downloadResource(id) is already a single-resource endpoint so per-resource
+    // processing is efficient regardless.
+    const subscriptions = resourceIds
+      ? {
+          total: allSubscriptions.subscriptions.filter(s => resourceIds.has(s.id)).length,
+          subscriptions: allSubscriptions.subscriptions.filter(s => resourceIds.has(s.id)),
+        }
+      : allSubscriptions;
 
     logToolStep('sync_resources', 'Subscriptions fetched', {
-      total: subscriptions.total,
+      totalFromApi: allSubscriptions.total,
+      afterFilter: subscriptions.total,
+      filterActive: resourceIds !== null,
       duration: Date.now() - t1,
       ids: subscriptions.subscriptions.map(s => s.id),
     });
 
     // ── Step 2: Server-side Git sync (skip in check mode) ──────────────────
+    // IMPORTANT: git pull is a prerequisite for downloadResource(id) to return
+    // the latest content. The download API reads from the server-side local git
+    // checkout, so skipping this step — even when resource_ids is scoped —
+    // would cause download to return stale content once git-based sync is enabled.
     logToolStep('sync_resources', 'Step 2: Server-side Git sync');
 
     if (mode === 'check') {
@@ -1106,6 +1160,17 @@ export const syncResourcesTool = {
     'write_file, merge_mcp_json, or other actions that the AI Agent MUST execute on the ' +
     'USER\'S LOCAL MACHINE after receiving the response. ' +
     'Execute every action in the list in order before reporting success to the user. ' +
+    '📌 SINGLE-RESOURCE SYNC (recommended after subscribe): ' +
+    'Pass `resource_ids: ["<id>"]` to sync only specific resource(s). ' +
+    'local_actions_required will contain ONLY actions for those resources — drastically reduces context overhead. ' +
+    'Use this after manage_subscription(subscribe) to sync just the newly subscribed resource. ' +
+    '\n' +
+    '⚠️ FULL SYNC CONFIRMATION REQUIRED: ' +
+    'Calling with mode="full" without resource_ids requires user confirmation. ' +
+    'The server returns error code FULL_SYNC_REQUIRES_CONFIRMATION. ' +
+    'Surface the warning to the user, and if confirmed, retry with _confirmed_full_sync: true. ' +
+    'Full sync with resource_ids (scoped) does NOT require confirmation. ' +
+    '\n' +
     'OPTIMIZATION: Before calling this tool in incremental mode, read ~/.cursor/mcp.json ' +
     'and pass Object.keys(mcpServers || {}) as `configured_mcp_servers` parameter. ' +
     'This allows the server to skip downloading MCP resources that are already configured, ' +
@@ -1189,6 +1254,23 @@ export const syncResourcesTool = {
           'In incremental mode, the server skips downloading these MCP resources to reduce overhead. ' +
           'To populate this: read ~/.cursor/mcp.json and extract Object.keys(mcpServers || {}). ' +
           'Example: ["github", "gitlab", "postgres"]. Ignored in full mode (always downloads).',
+      },
+      resource_ids: {
+        type: 'array',
+        description:
+          'Optional list of specific resource IDs to sync. ' +
+          'When provided, ONLY these resources are processed — local_actions_required will ' +
+          'contain actions for these resources only. Dramatically reduces context overhead ' +
+          'when syncing after a single subscribe. ' +
+          'When omitted, all subscribed resources are processed (existing behaviour). ' +
+          'Also bypasses the full-sync confirmation guard when used with mode="full".',
+      },
+      _confirmed_full_sync: {
+        type: 'boolean',
+        description:
+          'Set to true after obtaining explicit user confirmation for a full sync (mode="full" without resource_ids). ' +
+          'When mode="full" is called without resource_ids and without this flag, the server returns ' +
+          'FULL_SYNC_REQUIRES_CONFIRMATION error. Surface the warning to the user, then retry with this set to true.',
       },
     },
   },
