@@ -281,6 +281,11 @@ export interface ManageSubscriptionResult {
   sync_details?: Array<{ id: string; name: string; action: string }>;
   /** MCP servers that need manual configuration after auto-sync */
   pending_setup?: unknown[];
+  /**
+   * Local filesystem actions the AI agent must execute on the user's machine.
+   * Present on unsubscribe when skill directories or manifest files need cleanup.
+   */
+  local_actions_required?: LocalAction[];
 }
 
 // search_resources

@@ -10,6 +10,7 @@ import type { ManageSubscriptionParams, ManageSubscriptionResult, ToolResult } f
 import { syncResources } from './sync-resources';
 import { uninstallResource } from './uninstall-resource';
 import { promptManager } from '../prompts/index.js';
+import { getCspAgentDirForClient } from '../utils/cursor-paths.js';
 
 export async function manageSubscription(params: unknown): Promise<ToolResult<ManageSubscriptionResult>> {
   const startTime = Date.now();
@@ -135,6 +136,8 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         // Uninstall local files and MCP config for each resource.
         // For Command/Skill: unregister MCP Prompt instead of deleting local files.
         const uninstallResults: Array<{ id: string; removed: boolean; detail: string }> = [];
+        // Collect local_actions_required from skill cleanup to return to the AI.
+        const unsubscribeLocalActions: import('../types/tools.js').LocalAction[] = [];
         for (const resourceId of typedParams.resource_ids) {
           // Determine if this is a Command or Skill by checking the prompt registry.
           // API resource IDs are UUIDs (e.g. "0ccd800f..."), NOT prefixed with "cmd-"/"skill-".
@@ -151,8 +154,50 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             const resourceType = (parts[0] ?? 'command') as 'command' | 'skill';
             const resourceName = parts.slice(1).join('/') || matchedPromptName;
             promptManager.unregisterPrompt(resourceId, resourceType, resourceName, typedParams.user_token ?? '');
-            uninstallResults.push({ id: resourceId, removed: true, detail: `Unregistered MCP Prompt for "${resourceName}"` });
             logger.info({ resourceId, resourceType, matchedPromptName }, 'MCP Prompt unregistered on unsubscribe');
+
+            // For skills, also delete the local script directory and manifest file.
+            // Previously this branch hit `continue` without cleaning up local files,
+            // leaving stale scripts in ~/.csp-ai-agent/skills/<name>/ and the manifest
+            // in ~/.csp-ai-agent/.manifests/<name>.md after unsubscription.
+            if (resourceType === 'skill') {
+              const skillDir = `${getCspAgentDirForClient('skills')}/${resourceName}`;
+              const manifestFile = `${getCspAgentDirForClient('.manifests')}/${resourceName}.md`;
+
+              // Execute delete synchronously via the filesystem so no local_actions_required
+              // need to be returned to the AI — the server can delete these paths directly
+              // because they live on the client machine only when running locally, but for
+              // remote deployments we fall back to returning delete actions just like
+              // uninstall_resource does.  We always emit local_actions so the client-side
+              // agent can execute them regardless of where the server runs.
+              //
+              // We reuse uninstallResource with resource_id_or_name = resourceName so all
+              // existing delete + manifest logic is applied consistently.
+              const uninstallResult = await uninstallResource({
+                resource_id_or_name: resourceName,
+                remove_from_account: false,
+                resource_type: 'skill',
+                user_token: typedParams.user_token,
+              });
+              if (uninstallResult.success) {
+                // Collect delete actions so they are returned to the AI for execution.
+                const actions = uninstallResult.data?.local_actions_required;
+                if (Array.isArray(actions) && actions.length > 0) {
+                  unsubscribeLocalActions.push(...actions);
+                }
+                logger.info(
+                  { resourceName, skillDir, manifestFile, actionCount: actions?.length ?? 0 },
+                  'Local skill directory and manifest queued for deletion on unsubscribe',
+                );
+              } else {
+                logger.warn(
+                  { resourceName, error: uninstallResult.error },
+                  'Failed to queue local skill directory deletion on unsubscribe',
+                );
+              }
+            }
+
+            uninstallResults.push({ id: resourceId, removed: true, detail: `Unregistered MCP Prompt for "${resourceName}"` });
             continue;
           }
           // Use the last segment of the resource ID as the search pattern
@@ -198,8 +243,12 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             `Successfully unsubscribed from ${typedParams.resource_ids.length} resource${typedParams.resource_ids.length > 1 ? 's' : ''}.`,
             removedCount > 0 ? `Removed local files for ${removedCount} resource${removedCount > 1 ? 's' : ''}.` : null,
             notFoundCount > 0 ? `${notFoundCount} resource${notFoundCount > 1 ? 's were' : ' was'} not installed locally.` : null,
+            unsubscribeLocalActions.length > 0
+              ? `Execute ${unsubscribeLocalActions.length} action(s) in local_actions_required to delete local skill files and manifests.`
+              : null,
           ].filter(Boolean).join(' '),
           sync_details: uninstallResults.map(r => ({ id: r.id, name: r.id, action: r.removed ? 'uninstalled' : 'not_found_locally' })),
+          ...(unsubscribeLocalActions.length > 0 ? { local_actions_required: unsubscribeLocalActions } : {}),
         };
 
         logger.info({ count: typedParams.resource_ids.length, removedCount }, 'Resources unsubscribed and local files cleaned up');
