@@ -317,6 +317,9 @@ export class PromptManager {
 
     const jiraId = this.normalizeJiraId(params.jiraId);
     if (params.userToken) {
+      // Record the invocation locally, then immediately flush to the remote API
+      // so that query_usage_stats reflects the latest count without waiting for
+      // the periodic 10-second flush timer.
       await telemetry
         .recordInvocation(
           resolved.meta.resource_id,
@@ -326,6 +329,7 @@ export class PromptManager {
           jiraId,
         )
         .catch(() => { /* non-critical */ });
+      telemetry.flush().catch(() => { /* non-critical — periodic flush is the fallback */ });
     }
 
     const strippedContent = this.stripTrackingHeader(resolved.content, resolved.meta);
@@ -599,11 +603,14 @@ export class PromptManager {
 
       // Fire-and-forget telemetry recording attributed to the calling user.
       // userToken is captured from the SSE connection at handler-install time.
+      // Flush immediately after recording so the remote API reflects the latest
+      // count without waiting for the periodic 10-second flush timer.
       const effectiveToken = userToken ?? '';
       if (effectiveToken) {
         telemetry
           .recordInvocation(meta.resource_id, meta.resource_type, meta.resource_name, effectiveToken, jiraId)
           .catch(() => { /* non-critical */ });
+        telemetry.flush().catch(() => { /* non-critical — periodic flush is the fallback */ });
       }
 
       logger.info(
