@@ -40,7 +40,7 @@
 | 2 | **测试验证强制** | 每阶段完成必须创建测试用例并通过，双重验证（脚本输出 + 日志） |
 | 3 | **自动生成 README** | 系统编码完成后必须生成/更新 README.md |
 | 4 | **Git 提交需确认** | 所有 git push 必须获得用户明确确认 |
-| 5 | **发布流程规范** | 先 npm 发布成功，再 Git 提交 |
+| 5 | **发布流程规范** | 先 npm 发布成功，再 Git 提交；发布后通知服务端部署，部署完成后运行集成测试 |
 | 6 | **错误记录与改进** | 犯错被纠正后必须记录到「经验教训」章节 |
 | 7 | **Bug 管理规范** | Bug 必须建档，修复后生成测试用例，三文件齐全后归档 |
 | 8 | **设计文档符合性自检** | 重大变更完成后检查符合度（目标 ≥ 90%） |
@@ -179,6 +179,22 @@ git add . && git commit -m "..." && git push origin main
 - ❌ npm 发布失败不得执行 Git 提交
 - ❌ 未经用户确认不得发布或提交
 - 版本号遵循语义化版本：MAJOR.MINOR.PATCH
+
+**发布后必须执行（不可跳过）：**
+
+```
+Step 4: 通知服务端部署
+  → 告知用户："npm 发布成功，请通知服务端部署新版本（@elliotding/ai-agent-mcp@<version>）。"
+  → 等待用户确认服务端部署完成
+
+Step 5: 部署完成后运行集成测试
+  → 提示用户："服务端部署完成后，请让我运行集成测试以验证所有功能：
+    '请运行 Test/test-manual-agent-interaction.md 中的所有 Case 并输出测试报告'"
+  → 用户触发后，按照 Test/test-manual-agent-interaction.md 逐 Case 执行并输出完整测试报告
+```
+
+- ❌ 禁止在服务端部署完成并测试通过前认为发布流程已结束
+- ✅ 测试报告必须包含每个 Case 的结果（PASS / FAIL）及发现的 Bug
 
 ---
 
@@ -326,7 +342,7 @@ Test/Test Reports/FEAT-xxx/
   → 规则#0:  openspec archive → 同步 Docs/Design
   → 规则#10: 归档 Feature 文档 + 测试报告（用户确认后）
   → 规则#3:  更新 README.md
-  → 规则#5:  npm 发布（用户确认）→ 规则#4: Git 提交（用户确认）
+  → 规则#5:  npm 发布（用户确认）→ 规则#4: Git 提交（用户确认）→ 通知服务端部署 → 部署完成后运行 Test/test-manual-agent-interaction.md 集成测试
 ```
 
 ---
@@ -344,6 +360,8 @@ Test/Test Reports/FEAT-xxx/
 | 新增 MCP Tool 未更新 API-Mapping | 归档前必须同步 |
 | npm 发布失败仍 Git 提交 | npm 成功后才能 Git |
 | 未经确认直接推送 | 必须用户明确确认 |
+| 发布后未通知服务端部署 | 发布成功后必须提示用户通知服务端部署 |
+| 服务端部署完成后未运行集成测试 | 部署完成后必须运行 Test/test-manual-agent-interaction.md 全部 Case |
 | 收到上下文警告未调用 skill | 立即调用 context-relay |
 | 犯错被纠正未记录 | 写入经验教训章节 |
 
