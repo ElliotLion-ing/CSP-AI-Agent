@@ -1,6 +1,6 @@
 # CSP AI Agent 手动交互测试流程
 
-**版本：** 1.1.0  
+**版本：** 1.2.0  
 **类型：** 手动 Agent 交互测试（Human-in-the-loop）  
 **触发方式：** 服务部署完成后，用户手动触发 AI 按照本流程执行  
 **测试目标：** 模拟真实用户与 Agent 的对话交互，验证 CSP AI Agent 的核心行为链路
@@ -381,6 +381,76 @@ AI 对比以下维度：
 
 ---
 
+### Case 9：取消订阅 MCP 类型资源 → mcp.json 条目清理
+
+**前置条件：** 订阅列表中存在 `acm`（type: mcp）资源，且 `~/.cursor/mcp.json` 中已有对应的 `mcpServers.acm` 条目
+
+**模拟用户语句：**
+> "小助手，帮我取消 acm 这个 MCP 的订阅"
+
+**Step 9-1：记录取消前 mcp.json 中的 acm 条目**
+
+AI 执行：
+```bash
+# 读取当前 mcp.json 中 acm 相关条目（仅展示 key，不展示完整内容避免泄露）
+python3 -c "
+import json, os
+path = os.path.expanduser('~/.cursor/mcp.json')
+with open(path) as f:
+    d = json.load(f)
+servers = d.get('mcpServers', {})
+acm_keys = [k for k in servers.keys() if 'acm' in k.lower()]
+print('ACM-related keys in mcp.json:', acm_keys)
+"
+```
+
+记录：`mcp.json` 中 acm 相关的 key 列表（如 `acm`、`acm-dev`）
+
+---
+
+**Step 9-2：执行取消订阅**
+
+AI 执行路径：
+1. 调用 `manage_subscription(action: list)` 确认 `acm` 在订阅列表中
+2. 调用 `manage_subscription(action: "unsubscribe", resource_ids: ["<acm 的 resource_id>"])`
+3. 检查返回的 `local_actions_required` 中是否包含 `remove_mcp_json_entry` 操作
+4. 执行 `remove_mcp_json_entry`：从 `~/.cursor/mcp.json` 中移除 `mcpServers.acm` 条目
+
+---
+
+**Step 9-3：验证 mcp.json 条目已清理**
+
+AI 执行：
+```bash
+python3 -c "
+import json, os
+path = os.path.expanduser('~/.cursor/mcp.json')
+with open(path) as f:
+    d = json.load(f)
+servers = d.get('mcpServers', {})
+acm_present = 'acm' in servers
+print('acm still in mcp.json:', acm_present)
+print('Remaining keys:', list(servers.keys()))
+"
+```
+
+预期：`acm still in mcp.json: False`（acm 条目已从 mcp.json 中移除）
+
+---
+
+**结果对照表：**
+
+| 验证项 | 预期行为 | 实际结果 | 通过？ |
+|--------|----------|----------|--------|
+| 订阅列表中移除 acm | `manage_subscription(list)` 不再返回 acm | | |
+| local_actions 包含 remove_mcp_json_entry | 返回中有 `action: "remove_mcp_json_entry"` | | |
+| mcp.json 条目已删除 | `mcpServers.acm` 不存在 | | |
+| 其他 mcp.json 条目不受影响 | 其他 MCP server 配置保持不变 | | |
+
+> **注意：** 测试完成后必须在收尾阶段重新订阅 `acm` 并执行 `sync_resources` 以恢复 `mcp.json` 中的 acm 配置。
+
+---
+
 ## 测试执行顺序
 
 ```
@@ -402,7 +472,9 @@ Case 6：模糊调用路由（CSP 优先 → Fallback）
   ↓
 Case 7：Telemetry 计数
   ↓
-收尾：恢复订阅状态到测试前快照
+Case 9：取消订阅 MCP 资源 → mcp.json 条目清理
+  ↓
+收尾：恢复订阅状态到测试前快照（含 acm mcp.json 配置恢复）
 ```
 
 ---
@@ -458,6 +530,7 @@ Case 4 - 搜索 → 订阅 → Prompt 刷新：        ✅ PASS / ❌ FAIL
 Case 5 - 取消订阅 → 清理：                  ✅ PASS / ❌ FAIL
 Case 6 - 模糊调用路由：                     ✅ PASS / ❌ FAIL
 Case 7 - Telemetry 计数：                   ✅ PASS / ❌ FAIL
+Case 9 - MCP 取消订阅 → mcp.json 清理：    ✅ PASS / ❌ FAIL
 
 失败项详情：
 - Case X：[具体失败原因]
@@ -476,3 +549,4 @@ Case 7 - Telemetry 计数：                   ✅ PASS / ❌ FAIL
 5. **Case 6 需要临时调整订阅状态**，操作前告知用户会临时取消某订阅用于测试
 6. **Telemetry 验证**如果服务端没有暴露查询接口，可以通过日志确认（查看服务端 Logs 目录）
 7. **Case 8 远端对比** 需要 helper-gitlab 工具可用且有访问 `git.zoom.us/main/csp` 的权限；若 GitLab 不可达，可手动打开 `https://git.zoom.us/main/csp/-/tree/main/ai-resources/skills/zoom-build` 对比文件大小和版本号
+8. **Case 9 执行后**必须在收尾阶段重新订阅 `acm` 并 sync，以确保 `mcp.json` 中的 acm 配置被正确恢复；此 Case 会临时使 acm MCP 从 Cursor 配置中消失，应告知用户

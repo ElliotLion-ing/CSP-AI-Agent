@@ -201,6 +201,17 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
               ...(resolvedType ? { resource_type: resolvedType } : {}),
             });
             if (uninstallResult.success && uninstallResult.data && uninstallResult.data.removed_resources.length > 0) {
+              // Collect local_actions_required (e.g. remove_mcp_json_entry for mcp-type resources,
+              // delete_file for rule files) so they are forwarded to the AI agent for execution.
+              if (uninstallResult.data.local_actions_required && uninstallResult.data.local_actions_required.length > 0) {
+                unsubscribeLocalActions.push(
+                  ...(uninstallResult.data.local_actions_required as import('../types/tools.js').LocalAction[]),
+                );
+                logger.info(
+                  { resourceId, pattern, actionCount: uninstallResult.data.local_actions_required.length },
+                  'Collected local_actions_required from uninstallResource for unsubscribe',
+                );
+              }
               uninstallResults.push({ id: resourceId, removed: true, detail: `Removed local files for "${pattern}"` });
               uninstalled = true;
               break;
