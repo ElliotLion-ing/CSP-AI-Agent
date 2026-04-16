@@ -393,6 +393,13 @@ export class HTTPServer {
       // above — emitting exactly ONE absolute endpoint event to the wire.
       await mcpServer.connect(transport);
 
+      // Instruct the SSE client to retry after 3 seconds if the connection drops.
+      // This follows the W3C SSE spec: the client waits `retry` ms before re-issuing
+      // GET /sse, enabling automatic reconnection after transient network loss (e.g.
+      // laptop lid close / sleep).  If the client ignores this field the behaviour is
+      // identical to before, so this change is safe to ship unconditionally.
+      reply.raw.write('retry: 3000\n\n');
+
       const absoluteMessageUrl = `${publicOrigin}${messagePath}?sessionId=${sdkSessionId}`;
       logger.info(
         { sdkSessionId, absoluteMessageUrl, publicOrigin },
