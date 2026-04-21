@@ -37,6 +37,7 @@ import type {
 } from '../types/tools';
 import { telemetry } from '../telemetry/index.js';
 import { promptManager } from '../prompts/index.js';
+import { expandMdReferences } from '../utils/md-reference-expander.js';
 
 /**
  * Server-side in-memory download cache.
@@ -489,6 +490,14 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               (subWithMeta.description as string | undefined) ??
               sub.name;
 
+            // ── Lazy-load md reference expansion ────────────────────────────
+            // Replace internal md references in SKILL.md / COMMAND.md with
+            // mandatory resolve_prompt_content tool call instructions.
+            // The agent fetches each referenced file on demand, preventing
+            // context bloat from upfront inlining.  Nested references
+            // (A→B→C) are handled recursively at each tool call level.
+            const { expandedContent } = expandMdReferences(rawContent, sub.id);
+
             const meta = {
               resource_id: sub.id,
               // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
@@ -496,7 +505,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               resource_name: sub.name,
               team: (subWithMeta.team as string | undefined) ?? 'general',
               description,
-              rawContent,
+              rawContent: expandedContent, // internal md refs replaced by tool call instructions
             };
             // userToken is required so the prompt is scoped to this user's namespace.
             const effectiveToken = userToken ?? '';

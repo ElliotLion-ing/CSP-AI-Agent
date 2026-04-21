@@ -320,6 +320,14 @@ export interface ResolvePromptContentParams {
   user_token?: string;
   /** Optional Jira Issue ID for usage correlation. */
   jira_id?: string;
+  /**
+   * Optional relative path to an internal md file within the skill/command resource.
+   * When provided, the server reads and returns that specific file's content
+   * (with its own internal references also replaced by tool call instructions).
+   * Used by agents to lazily fetch md files referenced in SKILL.md.
+   * Example: "references/reference.md"
+   */
+  resource_path?: string;
 }
 
 export interface ResolvePromptContentResult {
