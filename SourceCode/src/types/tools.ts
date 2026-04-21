@@ -337,7 +337,7 @@ export interface ResolvePromptContentResult {
   resource_name: string;
   description: string;
   content: string;
-  content_source: 'cache' | 'generated' | 'raw_fallback';
+  content_source: 'cache' | 'generated' | 'raw_fallback' | 'api';
   usage_tracked: boolean;
 }
 

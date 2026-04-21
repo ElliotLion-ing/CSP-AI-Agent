@@ -6,14 +6,27 @@
  *
  * Extended with `resource_path` parameter to support lazy-loading of internal
  * md files referenced inside SKILL.md / COMMAND.md.  When resource_path is
- * provided the server reads that specific sub-file from the local git checkout
- * and applies the same reference-expansion so nested references (A→B→C) are
- * resolved correctly at each level without bloating the initial context.
+ * provided the server resolves that specific sub-file using the following
+ * priority chain (most reliable → least reliable):
+ *
+ *   1. CSP API download  — `downloadResource(resourceId)` returns ALL files for
+ *      the resource including sub-files.  This is the primary and most reliable
+ *      source because it does not depend on any local git checkout.
+ *   2. Local filesystem  — `readResourceFiles()` reads from the server-side
+ *      git checkout directory (Docker-mounted or manually cloned).  Used when
+ *      the API call fails or the sub-file is absent from the API response.
+ *   3. Git (implicit)   — already the lowest layer inside readResourceFiles();
+ *      only reached if neither of the above sources has the file.
+ *
+ * This ordering eliminates the dependency on a correctly-configured local git
+ * checkout for the common case, making sub-resource resolution robust even
+ * when git clone/pull has not been configured on the server.
  */
 
 import * as path from 'path';
 import { logger } from '../utils/logger';
 import { promptManager } from '../prompts/index.js';
+import { apiClient } from '../api/client.js';
 import { multiSourceGitManager } from '../git/multi-source-manager.js';
 import { expandMdReferences } from '../utils/md-reference-expander.js';
 import type {
@@ -106,12 +119,18 @@ export async function resolvePromptContent(
 /**
  * Resolve a sub-resource file (internal md referenced inside SKILL.md).
  *
- * Reads the file from the server-side git checkout, applies reference
- * expansion on its content (so nested A→B→C references are handled at
- * each level), and returns the expanded content.
+ * Uses a three-tier priority chain to locate the requested file:
+ *   1. CSP API  — downloadResource() returns all files for the resource;
+ *      most reliable, no dependency on local git checkout.
+ *   2. Local filesystem — readResourceFiles() reads from the Docker-mounted
+ *      or manually-cloned server-side git checkout directory.
+ *   3. Git (implicit inside readResourceFiles) — lowest priority fallback.
  *
- * Security: the resourcePath is normalised and validated to prevent
- * path traversal outside the skill directory.
+ * After locating the file content, reference-expansion is applied so that
+ * nested A→B→C references are resolved correctly at each level.
+ *
+ * Security: resourcePath is normalised and validated to prevent path
+ * traversal outside the skill directory.
  */
 async function resolveSubResource(
   resourceId: string | undefined,
@@ -132,7 +151,7 @@ async function resolveSubResource(
     };
   }
 
-  // Resolve the resource name from the registered prompt.
+  // Resolve the resource name and type from the registered prompt.
   let resourceName: string | undefined;
   let resolvedResourceId: string | undefined;
   let resourceType: 'command' | 'skill' = 'skill';
@@ -168,30 +187,86 @@ async function resolveSubResource(
     };
   }
 
-  // Read all files for this resource from the local git checkout.
-  const sourceFiles = await multiSourceGitManager.readResourceFiles(resourceName, resourceType);
+  // Helper: normalise a file path the same way for comparison.
+  const normFilePath = (p: string) => path.normalize(p).replace(/\\/g, '/').replace(/^\.\//, '');
 
-  // Find the requested sub-file.
-  const target = sourceFiles.find(
-    (f) => path.normalize(f.path).replace(/\\/g, '/').replace(/^\.\//, '') === normPath,
+  // ── Tier 1: CSP API download ───────────────────────────────────────────
+  // downloadResource() returns ALL files for the resource (including sub-files
+  // like reference.md). This is the primary source — it works regardless of
+  // whether the server-side git checkout is configured or up-to-date.
+  logger.info(
+    { resourceName, resourcePath: normPath, resolvedResourceId },
+    'resolveSubResource: tier-1 — attempting API download',
   );
+  try {
+    const downloadResult = await apiClient.downloadResource(resolvedResourceId, userToken || undefined);
+    const apiFile = downloadResult.files.find((f) => normFilePath(f.path) === normPath);
+    if (apiFile) {
+      logger.info(
+        { resourceName, resourcePath: normPath, source: 'api', contentLength: apiFile.content.length },
+        'resolveSubResource: tier-1 hit — sub-file found via API download',
+      );
+      const { expandedContent } = expandMdReferences(apiFile.content, resolvedResourceId);
+      return {
+        success: true,
+        data: {
+          prompt_name: `skill/${resourceName}/${normPath}`,
+          resource_id: resolvedResourceId,
+          resource_type: resourceType,
+          resource_name: resourceName,
+          description: `Internal resource file: ${normPath}`,
+          content: expandedContent,
+          content_source: 'api',
+          usage_tracked: false,
+        },
+      };
+    }
+    logger.info(
+      { resourceName, resourcePath: normPath, availableApiPaths: downloadResult.files.map((f) => f.path) },
+      'resolveSubResource: tier-1 miss — sub-file not in API response, falling back to local filesystem',
+    );
+  } catch (apiErr) {
+    logger.warn(
+      { resourceName, resourcePath: normPath, error: (apiErr as Error).message },
+      'resolveSubResource: tier-1 failed — API download error, falling back to local filesystem',
+    );
+  }
 
-  if (!target) {
+  // ── Tier 2 & 3: Local filesystem / git checkout ────────────────────────
+  // readResourceFiles() reads from the Docker-mounted or manually-cloned
+  // server-side directory (tier 2), with git as its own internal fallback
+  // (tier 3).  Neither tier requires git to be fully operational.
+  logger.info(
+    { resourceName, resourcePath: normPath },
+    'resolveSubResource: tier-2 — attempting local filesystem read',
+  );
+  const sourceFiles = await multiSourceGitManager.readResourceFiles(resourceName, resourceType);
+  const localFile = sourceFiles.find((f) => normFilePath(f.path) === normPath);
+
+  if (!localFile) {
     logger.warn(
       { resourceName, resourcePath: normPath, availablePaths: sourceFiles.map((f) => f.path) },
-      'resolve_prompt_content: requested sub-resource file not found in git checkout',
+      'resolveSubResource: all tiers exhausted — sub-resource file not found',
     );
     return {
       success: false,
       error: {
         code: 'RESOURCE_FILE_NOT_FOUND',
-        message: `File "${normPath}" not found in resource "${resourceName}". Available files: ${sourceFiles.map((f) => f.path).join(', ')}`,
+        message:
+          `File "${normPath}" not found in resource "${resourceName}". ` +
+          `Tried: (1) CSP API download, (2) local filesystem/git checkout. ` +
+          `Available local files: ${sourceFiles.map((f) => f.path).join(', ') || '(none)'}`,
       },
     };
   }
 
+  logger.info(
+    { resourceName, resourcePath: normPath, source: 'local', contentLength: localFile.content.length },
+    'resolveSubResource: tier-2 hit — sub-file found in local filesystem',
+  );
+
   // Expand any internal references in the sub-file (supports A→B→C nesting).
-  const { expandedContent } = expandMdReferences(target.content, resolvedResourceId);
+  const { expandedContent } = expandMdReferences(localFile.content, resolvedResourceId);
 
   logger.info(
     { resourceName, resourcePath: normPath, contentLength: expandedContent.length },
