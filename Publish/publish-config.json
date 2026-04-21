@@ -1,0 +1,183 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Publish Configuration",
+  "description": "Configuration for npm publish and git commit workflow",
+  "type": "object",
+  "properties": {
+    "npm": {
+      "type": "object",
+      "description": "npm publish configuration",
+      "properties": {
+        "registry": {
+          "type": "string",
+          "description": "npm registry URL",
+          "default": "https://registry.npmjs.org/"
+        },
+        "access": {
+          "type": "string",
+          "description": "Package access level",
+          "enum": ["public", "restricted"],
+          "default": "public"
+        },
+        "tag": {
+          "type": "string",
+          "description": "Default publish tag",
+          "enum": ["latest", "beta", "alpha", "next"],
+          "default": "latest"
+        },
+        "prePublish": {
+          "type": "array",
+          "description": "Scripts to run before publishing",
+          "items": {
+            "type": "string"
+          },
+          "default": ["test", "build"]
+        },
+        "checkLogs": {
+          "type": "boolean",
+          "description": "Check logs for errors before publishing",
+          "default": true
+        }
+      }
+    },
+    "git": {
+      "type": "object",
+      "description": "Git commit and push configuration",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "description": "Git repository URL (SSH format)",
+          "default": "git@github.com:ElliotLion-ing/CSP-AI-Agent.git"
+        },
+        "defaultBranch": {
+          "type": "string",
+          "description": "Default branch for pushing",
+          "default": "main"
+        },
+        "commitMessageTemplate": {
+          "type": "string",
+          "description": "Template for commit message",
+          "default": "chore: release v${version}"
+        },
+        "checkSensitiveFiles": {
+          "type": "boolean",
+          "description": "Check for sensitive files before committing",
+          "default": true
+        },
+        "excludePatterns": {
+          "type": "array",
+          "description": "Patterns to exclude from git tracking",
+          "items": {
+            "type": "string"
+          },
+          "default": ["csp/", "*.key", "*.pem", ".env", "credentials.json"]
+        }
+      }
+    },
+    "version": {
+      "type": "object",
+      "description": "Version management configuration",
+      "properties": {
+        "scheme": {
+          "type": "string",
+          "description": "Versioning scheme",
+          "enum": ["semver"],
+          "default": "semver"
+        },
+        "bumpRules": {
+          "type": "object",
+          "description": "Version bump rules",
+          "properties": {
+            "breaking": {
+              "type": "string",
+              "description": "Version part to bump for breaking changes",
+              "enum": ["major", "minor", "patch"],
+              "default": "major"
+            },
+            "feature": {
+              "type": "string",
+              "description": "Version part to bump for new features",
+              "enum": ["major", "minor", "patch"],
+              "default": "minor"
+            },
+            "bugfix": {
+              "type": "string",
+              "description": "Version part to bump for bug fixes",
+              "enum": ["major", "minor", "patch"],
+              "default": "patch"
+            }
+          }
+        },
+        "prereleaseNames": {
+          "type": "object",
+          "description": "Prerelease version names",
+          "properties": {
+            "alpha": {
+              "type": "string",
+              "default": "alpha"
+            },
+            "beta": {
+              "type": "string",
+              "default": "beta"
+            },
+            "rc": {
+              "type": "string",
+              "default": "rc"
+            }
+          }
+        }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "description": "Publish workflow configuration",
+      "properties": {
+        "order": {
+          "type": "array",
+          "description": "Strict order of publish steps",
+          "items": {
+            "type": "string",
+            "enum": ["test", "check-logs", "build", "npm-publish", "git-commit", "git-push"]
+          },
+          "default": ["test", "check-logs", "build", "npm-publish", "git-commit", "git-push"]
+        },
+        "stopOnError": {
+          "type": "boolean",
+          "description": "Stop workflow if any step fails",
+          "default": true
+        },
+        "requireUserConfirmation": {
+          "type": "boolean",
+          "description": "Require user confirmation before each major step",
+          "default": true
+        }
+      }
+    },
+    "notifications": {
+      "type": "object",
+      "description": "Notification configuration",
+      "properties": {
+        "onSuccess": {
+          "type": "boolean",
+          "description": "Send notification on successful publish",
+          "default": true
+        },
+        "onFailure": {
+          "type": "boolean",
+          "description": "Send notification on publish failure",
+          "default": true
+        },
+        "channels": {
+          "type": "array",
+          "description": "Notification channels",
+          "items": {
+            "type": "string",
+            "enum": ["console", "email", "slack"]
+          },
+          "default": ["console"]
+        }
+      }
+    }
+  },
+  "required": ["npm", "git", "version", "workflow"]
+}

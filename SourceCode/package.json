@@ -1,0 +1,69 @@
+{
+  "name": "@elliotding/ai-agent-mcp",
+  "version": "0.2.16",
+  "description": "CSP AI Agent MCP Server - Centralized AI tools distribution and management",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "bin": {
+    "csp-ai-agent-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "postbuild": "chmod +x dist/index.js",
+    "start": "NODE_PATH=. node dist/index.js",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "type-check": "tsc --noEmit",
+    "test": "echo \"Error: no test runner configured yet\" && exit 1",
+    "clean": "rm -rf dist",
+    "prebuild": "npm run clean",
+    "audit": "npm audit --audit-level=high",
+    "audit:fix": "npm audit fix",
+    "security-check": "npm list plain-crypto-js 2>&1 && echo 'WARNING: Malicious package detected!' || echo 'Security check passed'"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "ai-agent",
+    "cursor",
+    "tools-management"
+  ],
+  "author": "CSP Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@fastify/helmet": "^13.0.2",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "axios": "1.13.6",
+    "dotenv": "^16.4.0",
+    "fastify": "^5.8.2",
+    "fuse.js": "^7.1.0",
+    "ioredis": "^5.10.0",
+    "lru-cache": "^11.2.6",
+    "pino": "^8.19.0",
+    "pino-pretty": "^11.0.0",
+    "pino-roll": "^4.0.0",
+    "simple-git": "^3.22.0"
+  },
+  "overrides": {
+    "axios": "1.13.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^8.57.0",
+    "@typescript-eslint/parser": "^8.57.0",
+    "eslint": "^8.56.0",
+    "prettier": "^3.2.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}
