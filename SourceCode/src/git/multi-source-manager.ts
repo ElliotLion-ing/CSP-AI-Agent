@@ -23,12 +23,18 @@ interface SourceConfig {
   git_url?: string;  // Git repository URL
   git_branch?: string;  // Git branch (default: main)
   resources: {
-    commands: string;
-    skills: string;
-    mcp: string;
-    rules: string;
+    commands: string | string[];
+    skills: string | string[];
+    mcp: string | string[];
+    rules: string | string[];
   };
   description: string;
+}
+
+/** Normalise a single-string or array-of-strings resource dir config to always be an array. */
+function normalizePaths(v: string | string[] | undefined): string[] {
+  if (!v) return [];
+  return Array.isArray(v) ? v : [v];
 }
 
 interface SyncResult {
@@ -436,6 +442,7 @@ class MultiSourceGitManager {
     resourceName: string,
     resourceType: 'command' | 'skill' | 'rule' | 'mcp',
     includeAllFiles: boolean = false,
+    sourceName?: string,
   ): Promise<Array<{ path: string; content: string }>> {
     let sources: SourceConfig[];
     try {
@@ -453,8 +460,19 @@ class MultiSourceGitManager {
       );
       return [];
     }
-    // Sort by priority descending so higher-priority sources win.
-    sources.sort((a, b) => b.priority - a.priority);
+
+    // When sourceName is provided, restrict search to that source only (precise lookup).
+    // Otherwise search all sources sorted by priority descending (existing behavior).
+    if (sourceName) {
+      const matched = sources.find((s) => s.name === sourceName);
+      if (!matched) {
+        logger.warn({ resourceName, resourceType, sourceName }, 'readResourceFiles: specified sourceName not found');
+        return [];
+      }
+      sources = [matched];
+    } else {
+      sources.sort((a, b) => b.priority - a.priority);
+    }
 
     // Map singular type names to the plural directory keys used in config.
     const typeToDirKey: Record<string, keyof SourceConfig['resources']> = {
@@ -475,106 +493,128 @@ class MultiSourceGitManager {
         resolvedDirKey: typeDir,
         sourceCount: sources.length,
         sourceNames: sources.map((s) => s.name),
+        sourceName: sourceName ?? '(all)',
       },
       'readResourceFiles: start — searching git sources for resource',
     );
 
     for (const source of sources) {
       const sourcePath = path.join(this.baseDir, source.path);
-      const resourcesSubDir = source.resources[typeDir];
-      const resourceDir = path.join(sourcePath, resourcesSubDir, resourceName);
-      const resourceFile = path.join(sourcePath, resourcesSubDir, `${resourceName}.md`);
+
+      // Support both single-string and array-of-strings per resource type
+      const subDirs = normalizePaths(source.resources[typeDir]);
 
       logger.info(
         {
           source: source.name,
           resourceName,
           resourceType,
-          tryDirPath: resourceDir,
-          tryFilePath: resourceFile,
+          subDirs,
         },
         'readResourceFiles: trying source',
       );
 
-      // Try directory-based layout first (e.g. rules/<name>/ or mcp/<name>/)
-      try {
-        const stat = await fs.stat(resourceDir);
-        if (stat.isDirectory()) {
-          const results: Array<{ path: string; content: string }> = [];
-          
-          if (includeAllFiles) {
-            // Recursively read ALL files in the directory
-            await this.readDirectoryRecursive(resourceDir, '', results);
-            
-            if (results.length > 0) {
-              logger.info(
-                {
-                  source: source.name,
-                  resourceName,
-                  resourceType,
-                  dirPath: resourceDir,
-                  fileCount: results.length,
-                  files: results.map((r) => r.path),
-                },
-                'readResourceFiles: found all files in directory (recursive)',
-              );
-              return results;
-            }
-          } else {
-            // Legacy behavior: only markdown and mcp-config.json
-            const entries = await fs.readdir(resourceDir);
-            const relevantFiles = entries.filter(
-              (f) => f.endsWith('.md') || f.endsWith('.mdc') ||
-                (resourceType === 'mcp' && f === 'mcp-config.json'),
-            );
-            
-            if (relevantFiles.length > 0) {
-              for (const f of relevantFiles) {
-                const filePath = path.join(resourceDir, f);
-                const content = await fs.readFile(filePath, 'utf-8');
-                results.push({ path: f, content });
-              }
-              logger.info(
-                {
-                  source: source.name,
-                  resourceName,
-                  resourceType,
-                  dirPath: resourceDir,
-                  fileCount: results.length,
-                  files: results.map((r) => r.path),
-                },
-                'readResourceFiles: found files in directory layout',
-              );
-              return results;
-            }
-          }
-          
-          logger.info(
-            { source: source.name, resourceName, resourceType, dirPath: resourceDir },
-            'readResourceFiles: directory exists but contains no relevant files — trying flat file',
-          );
-        }
-      } catch { /* not a directory or doesn't exist — try flat file */ }
+      for (const resourcesSubDir of subDirs) {
+        const resourceDir = path.join(sourcePath, resourcesSubDir, resourceName);
+        const resourceFile = path.join(sourcePath, resourcesSubDir, `${resourceName}.md`);
 
-      // Try flat file layout (e.g. rules/<name>.mdc or rules/<name>.md)
-      // Also try .mdc extension for rule resources.
-      const mdcFile = path.join(sourcePath, resourcesSubDir, `${resourceName}.mdc`);
-      for (const [filePath, ext] of [[resourceFile, '.md'], [mdcFile, '.mdc']] as const) {
+        logger.info(
+          {
+            source: source.name,
+            subDir: resourcesSubDir,
+            resourceName,
+            resourceType,
+            tryDirPath: resourceDir,
+            tryFilePath: resourceFile,
+          },
+          'readResourceFiles: trying subDir',
+        );
+
+        // Try directory-based layout first (e.g. skills/<name>/ or mcp/<name>/)
         try {
-          const content = await fs.readFile(filePath, 'utf-8');
-          logger.info(
-            {
-              source: source.name,
-              resourceName,
-              resourceType,
-              filePath,
-              ext,
-              contentLength: content.length,
-            },
-            'readResourceFiles: found flat file',
-          );
-          return [{ path: `${resourceName}${ext}`, content }];
-        } catch { /* not found — try next extension or source */ }
+          const stat = await fs.stat(resourceDir);
+          if (stat.isDirectory()) {
+            const results: Array<{ path: string; content: string }> = [];
+
+            if (includeAllFiles) {
+              await this.readDirectoryRecursive(resourceDir, '', results);
+
+              if (results.length > 0) {
+                logger.info(
+                  {
+                    source: source.name,
+                    subDir: resourcesSubDir,
+                    resourceName,
+                    resourceType,
+                    dirPath: resourceDir,
+                    fileCount: results.length,
+                    files: results.map((r) => r.path),
+                  },
+                  'readResourceFiles: found all files in directory (recursive)',
+                );
+                return results;
+              }
+            } else {
+              const entries = await fs.readdir(resourceDir);
+              const relevantFiles = entries.filter(
+                (f) => f.endsWith('.md') || f.endsWith('.mdc') ||
+                  (resourceType === 'mcp' && f === 'mcp-config.json'),
+              );
+
+              if (relevantFiles.length > 0) {
+                for (const f of relevantFiles) {
+                  const filePath = path.join(resourceDir, f);
+                  const content = await fs.readFile(filePath, 'utf-8');
+                  results.push({ path: f, content });
+                }
+                logger.info(
+                  {
+                    source: source.name,
+                    subDir: resourcesSubDir,
+                    resourceName,
+                    resourceType,
+                    dirPath: resourceDir,
+                    fileCount: results.length,
+                    files: results.map((r) => r.path),
+                  },
+                  'readResourceFiles: found files in directory layout',
+                );
+                return results;
+              }
+            }
+
+            logger.info(
+              { source: source.name, subDir: resourcesSubDir, resourceName, resourceType, dirPath: resourceDir },
+              'readResourceFiles: directory exists but contains no relevant files — trying flat file',
+            );
+          }
+        } catch { /* not a directory or doesn't exist — try flat file */ }
+
+        // Try flat file layout (.md then .mdc)
+        const mdcFile = path.join(sourcePath, resourcesSubDir, `${resourceName}.mdc`);
+        for (const [filePath, ext] of [[resourceFile, '.md'], [mdcFile, '.mdc']] as const) {
+          try {
+            const content = await fs.readFile(filePath, 'utf-8');
+            logger.info(
+              {
+                source: source.name,
+                subDir: resourcesSubDir,
+                resourceName,
+                resourceType,
+                filePath,
+                ext,
+                contentLength: content.length,
+              },
+              'readResourceFiles: found flat file',
+            );
+            return [{ path: `${resourceName}${ext}`, content }];
+          } catch { /* not found — try next extension */ }
+        }
+
+        logger.info(
+          { source: source.name, subDir: resourcesSubDir, resourceName, resourceType },
+          'readResourceFiles: resource not found in this subDir — trying next',
+        );
       }
 
       logger.info(
@@ -584,7 +624,7 @@ class MultiSourceGitManager {
     }
 
     logger.warn(
-      { resourceName, resourceType, resolvedDirKey: typeDir, sourceCount: sources.length },
+      { resourceName, resourceType, resolvedDirKey: typeDir, sourceCount: sources.length, sourceName: sourceName ?? '(all)' },
       'readResourceFiles: resource not found in any git source',
     );
     return [];

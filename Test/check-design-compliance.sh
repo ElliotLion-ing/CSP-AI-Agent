@@ -15,7 +15,10 @@
 
 set -e
 
-PROJECT_ROOT="/Users/ElliotDing/SourceCode/AI Explore/Cursor-AI-Agent-MCP"
+# Resolve the project root relative to this script so the check works regardless
+# of the user's checkout location. Override with PROJECT_ROOT=... if needed.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 cd "$PROJECT_ROOT"
 
 REPORT_FILE="Docs/Compliance-Check-$(date +%Y-%m-%d).md"

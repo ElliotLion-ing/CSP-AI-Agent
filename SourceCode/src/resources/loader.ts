@@ -18,6 +18,12 @@ import type {
   LoaderStats,
 } from '../types/resources';
 
+/** Normalise a single-string or array-of-strings resource dir config to always be an array. */
+function normalizePaths(v: string | string[] | undefined): string[] {
+  if (!v) return [];
+  return Array.isArray(v) ? v : [v];
+}
+
 /**
  * Resource Loader
  * 
@@ -245,7 +251,7 @@ export class ResourceLoader {
         skills: 0,
         mcp: 0,
         rules: 0,
-      } as Record<ResourceType, number>,
+      },
       conflictsDetected: 0,
       loadDuration: 0,
     };
@@ -316,34 +322,38 @@ export class ResourceLoader {
       return;
     }
 
-    // Scan each resource type
+    // Scan each resource type — each type may map to one or more subdirectories
     for (const type of this.config!.resource_types) {
-      const subDir = source.resources[type];
-      if (!subDir) {
+      const subDirs = normalizePaths(source.resources[type]);
+      if (subDirs.length === 0) {
         logger.debug({ source: source.name, type }, 'Resource type not defined for this source, skipping');
         continue;
       }
 
-      const resourceDir = path.join(baseDir, subDir);
+      for (const subDir of subDirs) {
+        const resourceDir = path.join(baseDir, subDir);
 
-      try {
-        await fs.access(resourceDir);
-      } catch {
-        logger.debug({ source: source.name, type, path: resourceDir }, 'Resource directory not found, skipping');
-        continue;
+        try {
+          await fs.access(resourceDir);
+        } catch {
+          logger.debug({ source: source.name, type, path: resourceDir }, 'Resource directory not found, skipping');
+          continue;
+        }
+
+        await this.scanResourceType(source, type, resourceDir, subDir, stats);
       }
-
-      await this.scanResourceType(source, type, resourceDir, stats);
     }
   }
 
   /**
-   * Scan resources of a specific type from a directory
+   * Scan resources of a specific type from a directory.
+   * subDir is the config-relative path used to generate a unique resource key.
    */
   private async scanResourceType(
     source: AIResourcesConfig['default_source'],
     type: ResourceType,
     dir: string,
+    subDir: string,
     stats: LoaderStats
   ): Promise<void> {
     try {
@@ -355,7 +365,7 @@ export class ResourceLoader {
         if (entry.isFile() && (entry.name.endsWith('.md') || entry.name.endsWith('.mdc'))) {
           // Handle file resources (commands, rules)
           const resourceName = path.basename(entry.name, path.extname(entry.name));
-          this.indexResource(source, type, resourceName, fullPath, stats);
+          this.indexResource(source, type, resourceName, fullPath, subDir, stats);
         } else if (entry.isDirectory()) {
           // Handle directory resources:
           //   skill → must contain SKILL.md
@@ -365,7 +375,7 @@ export class ResourceLoader {
             const skillFile = path.join(fullPath, 'SKILL.md');
             try {
               await fs.access(skillFile);
-              this.indexResource(source, type, entry.name, skillFile, stats);
+              this.indexResource(source, type, entry.name, skillFile, subDir, stats);
             } catch {
               logger.debug({ dir: fullPath }, 'Directory does not contain SKILL.md, skipping');
             }
@@ -373,7 +383,7 @@ export class ResourceLoader {
             const mcpConfigFile = path.join(fullPath, 'mcp-config.json');
             try {
               await fs.access(mcpConfigFile);
-              this.indexResource(source, type, entry.name, mcpConfigFile, stats);
+              this.indexResource(source, type, entry.name, mcpConfigFile, subDir, stats);
             } catch {
               logger.debug({ dir: fullPath }, 'Directory does not contain mcp-config.json, skipping');
             }
@@ -386,6 +396,7 @@ export class ResourceLoader {
           source: source.name,
           type,
           dir,
+          subDir,
           error: error instanceof Error ? error.message : String(error),
         },
         'Failed to scan resource directory'
@@ -394,78 +405,55 @@ export class ResourceLoader {
   }
 
   /**
-   * Index a single resource with conflict detection
+   * Index a single resource.
+   *
+   * Key format: "type:name@source/subDir" — globally unique per physical path.
+   * Every distinct physical location is registered independently; there is no
+   * silent deduplication within the same source. Cross-source conflicts (same
+   * name + same subDir from two different sources) are still recorded.
    */
   private indexResource(
     source: AIResourcesConfig['default_source'],
     type: ResourceType,
     name: string,
     filePath: string,
+    subDir: string,
     stats: LoaderStats
   ): void {
-    const resourceKey = `${type}:${name}`;
+    // Unique key per physical location: same resource name in different dirs → different keys
+    const resourceKey = `${type}:${name}@${source.name}/${subDir}`;
     const existing = this.resourceIndex.get(resourceKey);
 
     if (existing) {
-      // Conflict detected
+      // True conflict: same key means same source + same subDir + same name.
+      // This should not happen in normal operation (duplicate files in the same dir).
       logger.warn(
         {
+          resourceKey,
           resourceName: name,
           type,
+          subDir,
           existingSource: existing.source,
-          existingPriority: existing.priority,
           newSource: source.name,
-          newPriority: source.priority,
         },
-        'Resource name conflict detected'
+        'Duplicate resource key detected (same name, source and subDir) — keeping first entry'
       );
 
-      // Record conflict
+      // Record conflict for visibility
       const conflict: ResourceConflict = {
         name,
         type,
         conflicts: [
-          {
-            source: existing.source,
-            priority: existing.priority,
-            path: existing.path,
-          },
-          {
-            source: source.name,
-            priority: source.priority,
-            path: filePath,
-          },
+          { source: existing.source, priority: existing.priority, path: existing.path },
+          { source: source.name, priority: source.priority, path: filePath },
         ],
-        selected:
-          source.priority > existing.priority
-            ? { source: source.name, priority: source.priority, path: filePath }
-            : { source: existing.source, priority: existing.priority, path: existing.path },
+        selected: { source: existing.source, priority: existing.priority, path: existing.path },
       };
-
       this.conflicts.push(conflict);
-
-      // Keep higher priority resource (already sorted by priority)
-      if (source.priority <= existing.priority) {
-        logger.debug(
-          {
-            resourceName: name,
-            selectedSource: existing.source,
-          },
-          'Keeping existing resource (higher priority)'
-        );
-        return;
-      }
-
-      logger.debug(
-        {
-          resourceName: name,
-          selectedSource: source.name,
-        },
-        'Replacing with new resource (higher priority)'
-      );
+      return;
     }
 
-    // Index resource
+    // Index resource — every physical path gets its own entry
     const metadata: ResourceMetadata = {
       id: resourceKey,
       name,
@@ -473,13 +461,14 @@ export class ResourceLoader {
       source: source.name,
       priority: source.priority,
       path: filePath,
+      dir: subDir,
     };
 
     this.resourceIndex.set(resourceKey, metadata);
     stats.resourcesIndexed++;
     stats.byType[type]++;
 
-    logger.debug({ resourceKey, source: source.name }, 'Resource indexed');
+    logger.debug({ resourceKey, source: source.name, subDir }, 'Resource indexed');
   }
 
   /**

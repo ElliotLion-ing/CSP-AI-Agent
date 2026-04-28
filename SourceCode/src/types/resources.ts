@@ -24,8 +24,8 @@ export interface ResourceSource {
   /** Priority (higher number = higher priority) */
   priority: number;
   
-  /** Mapping of resource types to subdirectories */
-  resources: Partial<Record<ResourceType, string>>;
+  /** Mapping of resource types to subdirectories (string or array of strings for multi-dir support) */
+  resources: Partial<Record<ResourceType, string | string[]>>;
   
   /** Optional description */
   description?: string;
@@ -67,7 +67,7 @@ export interface AIResourcesConfig {
  * Resource metadata
  */
 export interface ResourceMetadata {
-  /** Resource ID */
+  /** Resource ID — format: "type:name@source/subDir", globally unique per physical path */
   id: string;
   
   /** Resource name */
@@ -84,6 +84,9 @@ export interface ResourceMetadata {
   
   /** Full file path */
   path: string;
+
+  /** Subdirectory relative to source.path where this resource was found */
+  dir: string;
   
   /** Version (if available) */
   version?: string;
