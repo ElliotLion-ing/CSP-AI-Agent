@@ -85,6 +85,86 @@ function extractFrontmatterDescription(content: string): string | undefined {
   return undefined;
 }
 
+// ── Render-safety: base64-encode non-markdown file content ─────────────────
+//
+// Background: shipping raw shell / script bodies inside `content` /
+// `expected_content` fields of LocalAction items causes Cursor's renderer
+// (marked.js inline-link regex) to enter catastrophic backtracking on
+// `$()`, `[[ ]]`, URL-like substrings, and freezes the main thread.
+// See workspace/Issues/mcp-sync-complex-skill-cursor-crash.md.
+//
+// First attempt (markdown_fence_v1) tried to wrap content in a code fence,
+// but Cursor's renderer feeds the *raw JSON literal* to marked.js, where
+// `\n` is escaped as `\\n` and the fence never starts a real new line, so
+// the fence is just inert text and the inline-link regex still walks the
+// shell-script chars. Real-world test confirmed the freeze persisted.
+//
+// Final fix: for any non-`.md`/`.mdc` text file, base64-encode the content
+// and set `encoding: 'base64'`. The base64 alphabet (`[A-Za-z0-9+/=]`)
+// contains none of the metacharacters that marked.js's link regex looks
+// for (`[`, `]`, `(`, `)`, `<`, `>`, `!`), so backtracking cannot happen
+// no matter how long the string is.
+//
+// Markdown / mdc files stay UTF-8: they are valid markdown by themselves
+// and field testing has not produced a freeze on plain markdown content.
+
+const MARKDOWN_EXTENSIONS = new Set(['md', 'mdc']);
+
+function fileExtension(filePath: string): string {
+  const m = /\.([A-Za-z0-9]+)$/.exec(filePath);
+  return m ? m[1]!.toLowerCase() : '';
+}
+
+/**
+ * Encode a text file body for safe transport in the JSON tool response.
+ *
+ * Returns `{ content, encoding }` ready to spread into a write_file action.
+ *
+ * For `.md` / `.mdc` files: `{ content: rawContent, encoding: 'utf8' }`
+ * (no transformation, valid markdown is safe to render directly).
+ *
+ * For everything else: `{ content: base64(rawContent), encoding: 'base64' }`
+ * to defuse Cursor's marked.js link-regex catastrophic backtracking on
+ * shell/script characters.
+ *
+ * If the caller already declared a `priorEncoding` of 'base64' (binary file
+ * pre-encoded by the upstream), we pass content through unchanged.
+ */
+function encodeForRender(
+  filePath: string,
+  rawContent: string,
+  priorEncoding?: string,
+): { content: string; encoding: 'utf8' | 'base64' } {
+  if (priorEncoding === 'base64') {
+    return { content: rawContent, encoding: 'base64' };
+  }
+  if (MARKDOWN_EXTENSIONS.has(fileExtension(filePath))) {
+    return { content: rawContent, encoding: 'utf8' };
+  }
+  return {
+    content: Buffer.from(rawContent, 'utf8').toString('base64'),
+    encoding: 'base64',
+  };
+}
+
+/**
+ * Same as encodeForRender, but produces the field shape required by
+ * CheckFileAction (`expected_content` + a sibling encoding hint stored as
+ * `expected_content_encoding`). Returns the encoding even when 'utf8' so
+ * the AI Agent has an unambiguous signal.
+ */
+function encodeForCheck(
+  filePath: string,
+  rawContent: string,
+  priorEncoding?: string,
+): { expected_content: string; expected_content_encoding: 'utf8' | 'base64' } {
+  const enc = encodeForRender(filePath, rawContent, priorEncoding);
+  return {
+    expected_content: enc.content,
+    expected_content_encoding: enc.encoding,
+  };
+}
+
 
 export async function syncResources(params: unknown): Promise<ToolResult<SyncResourcesResult>> {
   const startTime = Date.now();
@@ -285,7 +365,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                       localActions.push({
                         action: 'check_file',
                         path: `${skillDir}/${scriptFile.relative_path}`,
-                        expected_content: scriptFile.content,
+                        ...encodeForCheck(scriptFile.relative_path, scriptFile.content, scriptFile.encoding),
                         resource_id: sub.id,
                         resource_name: sub.name,
                         resource_type: sub.type,
@@ -293,10 +373,15 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                     }
                     
                     // Also check the manifest file
+                    const proxyScript = metadata.script_files[0];
                     localActions.push({
                       action: 'check_file',
                       path: `${getCspAgentRootDirForClient()}/.manifests/${sub.name}.md`,
-                      expected_content: metadata.script_files[0]?.content ?? '',  // Use first script as proxy
+                      ...encodeForCheck(
+                        proxyScript?.relative_path ?? '',
+                        proxyScript?.content ?? '',
+                        proxyScript?.encoding,
+                      ),  // Use first script as proxy
                       resource_id: sub.id,
                       resource_name: sub.name,
                       resource_type: sub.type,
@@ -370,7 +455,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                     localActions.push({
                       action: 'check_file',
                       path: checkPath,
-                      expected_content: file.content,
+                      ...encodeForCheck(file.path, file.content),
                       resource_id: sub.id,
                       resource_name: sub.name,
                       resource_type: sub.type,
@@ -383,7 +468,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                   localActions.push({
                     action: 'check_file',
                     path: mcpJsonPath,
-                    expected_content: file.content,
+                    ...encodeForCheck(file.path, file.content),
                     resource_id: sub.id,
                     resource_name: sub.name,
                     resource_type: sub.type,
@@ -395,7 +480,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                   localActions.push({
                     action: 'check_file',
                     path: checkPath,
-                    expected_content: file.content,
+                    ...encodeForCheck(file.path, file.content),
                     resource_id: sub.id,
                     resource_name: sub.name,
                     resource_type: sub.type,
@@ -552,13 +637,12 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                   localActions.push({
                     action: 'write_file',
                     path: `${skillDir}/${firstScript.path}`,
-                    content: firstScript.content,
-                    encoding: 'utf8',
+                    ...encodeForRender(firstScript.path, firstScript.content),
                     mode: firstScript.path.includes('/scripts/') ? '0755' : undefined,
                     // Atomic update marker: client checks manifest FIRST
                     is_skill_manifest: true,
                     // SKILL.md content for version comparison (stored separately in .manifests/)
-                    skill_manifest_content: rawContent,
+                    skill_manifest_content: Buffer.from(rawContent, "utf8").toString("base64"),
                   });
                 }
                 
@@ -570,8 +654,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                   localActions.push({
                     action: 'write_file',
                     path: `${skillDir}/${scriptFile.path}`,
-                    content: scriptFile.content,
-                    encoding: 'utf8',
+                    ...encodeForRender(scriptFile.path, scriptFile.content),
                     mode: scriptFile.path.includes('/scripts/') ? '0755' : undefined,
                   });
                 }
@@ -606,11 +689,10 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                       localActions.push({
                         action: 'write_file',
                         path: `${skillDir}/${firstScript.relative_path}`,
-                        content: firstScript.content,
-                        encoding: firstScript.encoding ?? 'utf8',
+                        ...encodeForRender(firstScript.relative_path, firstScript.content, firstScript.encoding),
                         mode: firstScript.mode,
                         is_skill_manifest: true,
-                        skill_manifest_content: rawContent,
+                        skill_manifest_content: Buffer.from(rawContent, "utf8").toString("base64"),
                       });
                     }
                     
@@ -621,8 +703,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                       localActions.push({
                         action: 'write_file',
                         path: `${skillDir}/${scriptFile.relative_path}`,
-                        content: scriptFile.content,
-                        encoding: scriptFile.encoding ?? 'utf8',
+                        ...encodeForRender(scriptFile.relative_path, scriptFile.content, scriptFile.encoding),
                         mode: scriptFile.mode,
                       });
                     }
@@ -840,7 +921,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                 localActions.push({
                   action: 'write_file',
                   path: fileDest,
-                  content: file.content,
+                  ...encodeForRender(file.path, file.content),
                 });
                 writeActions.push(fileDest);
               }
@@ -926,7 +1007,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               localActions.push({
                 action: 'write_file',
                 path: fileDest,
-                content: file.content,
+                ...encodeForRender(file.path, file.content),
               });
               writeActions.push(fileDest);
             }
@@ -998,7 +1079,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               localActions.push({
                 action: 'write_file',
                 path: destPath,
-                content: file.content,
+                ...encodeForRender(file.path, file.content),
               });
               writeActions.push({ destPath, contentLength: file.content.length });
             }
@@ -1195,16 +1276,31 @@ export const syncResourcesTool = {
     'This allows the server to skip downloading MCP resources that are already configured, ' +
     'significantly reducing API calls, network traffic, and local action overhead. ' +
     '\n' +
+    '⚠️ BASE64 DECODE — APPLIES TO BOTH write_file AND check_file: ' +
+    '  When `encoding === "base64"` (write_file) or `expected_content_encoding === "base64"` ' +
+    '  (check_file), the corresponding `content` / `expected_content` field is base64-encoded ' +
+    '  by the server. The server does this for ALL non-.md/.mdc files (shell scripts, configs, ' +
+    '  binary blobs) to keep Cursor\'s renderer from triggering catastrophic regex backtracking ' +
+    '  on raw script characters ($(), [[ ]], URLs etc.) — see prior incident notes. ' +
+    '  AI Agent MUST decode base64 BEFORE writing to disk or comparing against local content: ' +
+    '    write_file:  fileBytes = Buffer.from(action.content, "base64") (write as binary buffer) ' +
+    '    check_file:  decoded = Buffer.from(action.expected_content, "base64").toString("utf8") ' +
+    '                 then string-compare against fs.readFileSync(action.path, "utf8") ' +
+    '  When the encoding field is "utf8" (or omitted), the value is the literal file body — ' +
+    '  write or compare as-is, no decoding. ' +
     'For write_file actions: ' +
     '  SPECIAL HANDLING FOR COMPLEX SKILLS (when action has `is_skill_manifest: true`): ' +
     '    (1) This action is the FIRST script file — check skill version using manifest FIRST. ' +
     '    (2) Read manifest file at {CSP_AGENT_ROOT}/.manifests/<skill-name>.md (if exists). ' +
     '        Where {CSP_AGENT_ROOT} is a SIBLING of {CURSOR_ROOT} (same parent directory). ' +
-    '    (3) Compare manifest content with action.skill_manifest_content field (string equality). ' +
+    '    (3) action.skill_manifest_content is ALWAYS base64-encoded — first decode it: ' +
+    '        decodedManifest = Buffer.from(action.skill_manifest_content, "base64").toString("utf8") ' +
+    '        Then compare decodedManifest against the existing manifest file content (string equality). ' +
     '    (4) If identical: SKIP this action AND ALL SUBSEQUENT write_file actions for this skill. ' +
     '    (5) If different or manifest missing: ' +
     '        - PROCEED with this action and all subsequent write_file actions for this skill. ' +
-    '        - After writing all script files, write action.skill_manifest_content to {CSP_AGENT_ROOT}/.manifests/<skill-name>.md ' +
+    '        - After writing all script files, write decodedManifest (the UTF-8 form, NOT the raw base64 string) ' +
+    '          to {CSP_AGENT_ROOT}/.manifests/<skill-name>.md ' +
     '    (6) NOTE: SKILL.md is NEVER written to the skills directory (only to .manifests/) to prevent Cursor auto-discovery. ' +
     '  GENERAL HANDLING (when action has NO `is_skill_manifest` marker): ' +
     '    (1) Read the existing file at `path` (if it exists) using fs.readFile() or equivalent. ' +

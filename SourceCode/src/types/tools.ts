@@ -20,9 +20,20 @@ export interface WriteFileAction {
   action: 'write_file';
   /** Absolute path on the user's local machine (may start with ~). */
   path: string;
-  /** File content to write. */
+  /**
+   * File content to write.
+   *
+   * When `encoding === 'base64'`, the value is base64-encoded — AI Agent
+   * MUST `Buffer.from(content, 'base64')` (or equivalent) before writing
+   * to disk. The server uses base64 for non-`.md` files (shell scripts,
+   * config, binary blobs) to keep Cursor's renderer from running
+   * catastrophic regex backtracking on raw script characters.
+   *
+   * When `encoding === 'utf8'` (or omitted), the value is the literal
+   * file body — write as-is.
+   */
   content: string;
-  /** File encoding (default: utf8). Set to base64 for binary files. */
+  /** File encoding. Defaults to 'utf8' when omitted. Server sets 'base64' for non-`.md` content. */
   encoding?: 'utf8' | 'base64';
   /** File permissions in octal string format (e.g. "0755" for executable, "0644" for regular). Unix only. */
   mode?: string;
@@ -55,6 +66,16 @@ export interface WriteFileAction {
    * SKILL.md content for incremental comparison (present when is_skill_manifest=true).
    * This content is NOT written to the path field — it's only used for version checking
    * and stored in the manifest directory.
+   *
+   * ALWAYS base64-encoded by the server (regardless of original file type).
+   * SKILL.md bodies routinely contain markdown links, code blocks, shell snippets
+   * and URL-shaped substrings that, when sent as raw UTF-8 inside a JSON tool
+   * response, trigger catastrophic regex backtracking in the Cursor renderer
+   * (marked.js inline-link parser) — see workspace/Issues/mcp-sync-complex-skill-cursor-crash.md.
+   *
+   * AI Agent MUST `Buffer.from(skill_manifest_content, 'base64').toString('utf8')`
+   * before string-comparing against the existing `.manifests/<skill>.md` file
+   * and before writing the manifest back.
    */
   skill_manifest_content?: string;
 }
@@ -102,8 +123,19 @@ export interface CheckFileAction {
   action: 'check_file';
   /** Absolute path on the user's local machine to check (may start with ~). */
   path: string;
-  /** Expected file content from remote server. */
+  /**
+   * Expected file content from remote server.
+   *
+   * When `expected_content_encoding === 'base64'`, the value is base64-encoded
+   * (server uses base64 for non-`.md` files to defuse Cursor renderer ReDoS).
+   * AI Agent MUST decode (`Buffer.from(value, 'base64').toString('utf8')`)
+   * before string-comparing against the local file content.
+   *
+   * When `expected_content_encoding === 'utf8'` (or omitted), compare as-is.
+   */
   expected_content: string;
+  /** Encoding of expected_content. Defaults to 'utf8' when omitted. */
+  expected_content_encoding?: 'utf8' | 'base64';
   /** Resource ID for tracking which resource this check belongs to. */
   resource_id: string;
   /** Resource name for user-friendly reporting. */
