@@ -1,6 +1,6 @@
 # AI Agent 工作规范
 
-**版本：** 2.3.0 | **最后更新：** 2026-03-20
+**版本：** 2.4.0 | **最后更新：** 2026-04-28
 
 本文档定义 AI Agent 在 Cursor-AI-Agent-MCP 项目中的工作规范。所有规则强制遵守。
 
@@ -143,8 +143,28 @@ System SHALL provide feature.
 **提交前必须展示给用户确认（`git status` + `git diff`），禁止自动推送。**
 
 - **项目代码仓库：** `https://github.com/ElliotLion-ing/CSP-AI-Agent`
-- **目标分支：** `main`（直接推送到 main，禁止推送到其他分支再手动合并）
+- **目标分支：** `main`（所有改动最终必须推送到 main，保证改动不丢失在个人 dev 分支）
 - `AI-Resources/`、`.cursor/` 目录已在 `.gitignore` 排除，禁止提交
+
+**分支使用规范（强制）：**
+- ✅ **所有开发操作在 main 分支上直接进行**（除非用户明确要求使用 dev 分支）
+- ✅ **每次 git push 后，必须确保本地当前分支为 main**
+- ✅ **若当前在 dev 分支推送，推送完毕后必须立即合并到 main 并推送 main，再切换回 main**
+- ❌ 禁止改动只推送到 dev 分支而不同步到 main（防止内容孤立在 dev 分支）
+
+**推送完整流程（有 dev 分支时）：**
+```bash
+# Step 1: 在 dev 分支提交并推送
+git add . && git commit -m "..." && git push origin <dev-branch>
+
+# Step 2: 切换到 main 并合并 dev
+git checkout main && git pull origin main
+git merge <dev-branch> --no-ff
+
+# Step 3: 推送 main 并保持当前分支为 main
+git push origin main
+# 此时本地分支已在 main，无需再切换
+```
 
 **提交信息规范：** `<type>: <subject>`（feat / fix / docs / refactor / test / chore）
 
@@ -156,7 +176,8 @@ System SHALL provide feature.
 □ .gitignore 已排除不应提交的目录
 □ 用户已明确确认
 □ 目标仓库地址正确
-□ 目标分支为 main
+□ 目标分支为 main（最终推送目标）
+□ 推送完成后本地分支在 main
 ```
 
 ---
@@ -350,7 +371,7 @@ Test/Test Reports/FEAT-xxx/
   → 规则#0:  openspec archive → 同步 Docs/Design
   → 规则#10: 归档 Feature 文档 + 测试报告（用户确认后）
   → 规则#3:  更新 README.md
-  → 规则#5:  npm 发布（用户确认）→ 规则#4: Git 提交（用户确认）→ 通知 dev 环境部署 → 执行 Test/Release Check/release-check-checklist.md 全部 Case → Report 全部通过后通知发布生产
+  → 规则#5:  npm 发布（用户确认）→ 规则#4: Git 提交并推送到 main（用户确认）→ 确保本地在 main 分支 → 通知 dev 环境部署 → 执行 Test/Release Check/release-check-checklist.md 全部 Case → Report 全部通过后通知发布生产
 ```
 
 ---
@@ -368,6 +389,8 @@ Test/Test Reports/FEAT-xxx/
 | 新增 MCP Tool 未更新 API-Mapping | 归档前必须同步 |
 | npm 发布失败仍 Git 提交 | npm 成功后才能 Git |
 | 未经确认直接推送 | 必须用户明确确认 |
+| 改动只推送到 dev 未同步 main | 推送后必须合并到 main 并推送，本地切回 main |
+| 推送后本地仍在 dev 分支 | 推送 main 完成后确保本地 checkout 在 main |
 | 发布后未通知服务端部署 | 发布成功后必须提示用户通知服务端部署 |
 | dev 环境部署后未执行 Release Check | 部署 dev 完成后必须按 Test/Release Check/release-check-checklist.md 执行全部 Case 并生成 Report |
 | Release Check 未通过就发布生产 | Release Check Report 全部 PASS 后才能通知发布生产 |
@@ -493,3 +516,4 @@ Docs/Design/
 - v2.1.0: Bug 归档三文件缺一不可
 - v2.2.0: 新 Feature 全流程开发规范（规则 #10）
 - v2.3.0: 规则 #10 补充——归档后必须删除 NewFeature/ 对应文件夹；用户设计变更时必须同步更新 feature-design.md，归档版本与 NewFeature 版本保持一致
+- v2.4.0: 规则 #4 补充——所有改动最终必须推送到 main；推送后本地分支切换回 main；禁止改动孤立在 dev 分支
