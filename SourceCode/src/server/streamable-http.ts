@@ -59,7 +59,7 @@ export class StreamableHTTPServer {
   // ─────────────────────────────────────────────────────────────────────────
 
   private setupRoutes(): void {
-    const basePath = config.http?.basePath ?? '';
+    const basePath = config.streamableHttp?.basePath ?? config.http?.basePath ?? '';
 
     // Health check — same contract as the SSE server
     this.fastify.get(`${basePath}/health`, async (_req, reply) => {
@@ -131,8 +131,10 @@ export class StreamableHTTPServer {
   // ─────────────────────────────────────────────────────────────────────────
 
   async start(): Promise<void> {
-    const host = config.http?.host ?? '0.0.0.0';
-    const port = config.http?.port ?? 3000;
+    // Use dedicated streamableHttp config block when available (dual mode),
+    // fall back to http config for standalone streamable_http mode.
+    const host = config.streamableHttp?.host ?? config.http?.host ?? '0.0.0.0';
+    const port = config.streamableHttp?.port ?? config.http?.port ?? 3001;
 
     await this.fastify.listen({ host, port });
     logger.info(

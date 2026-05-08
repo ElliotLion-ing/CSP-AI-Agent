@@ -96,6 +96,13 @@ async function startStreamableHttpServer(): Promise<void> {
 
 /**
  * Start MCP Server (auto-detect transport mode from config)
+ *
+ * Transport modes:
+ *   stdio           — local stdio (Cursor local MCP, default)
+ *   sse             — legacy SSE only (Cursor remote MCP)
+ *   streamable_http — Streamable HTTP only (Codex CLI)
+ *   dual            — SSE (port HTTP_PORT) + Streamable HTTP (port STREAMABLE_HTTP_PORT)
+ *                     simultaneously, serving Cursor and Codex from the same process
  */
 export async function startServer(): Promise<void> {
   registerTools();
@@ -103,7 +110,14 @@ export async function startServer(): Promise<void> {
   const transportMode = config.transport.mode;
   logger.info({ transportMode, agentProfile: config.agentProfile }, `Starting server with ${transportMode} transport`);
 
-  if (transportMode === 'sse') {
+  if (transportMode === 'dual') {
+    // Start both transports concurrently; fail fast if either one throws.
+    await Promise.all([
+      startSSEServer(),
+      startStreamableHttpServer(),
+    ]);
+    logger.info('✅ Dual transport mode: SSE + Streamable HTTP both started');
+  } else if (transportMode === 'sse') {
     await startSSEServer();
   } else if (transportMode === 'streamable_http') {
     await startStreamableHttpServer();
@@ -120,7 +134,12 @@ export async function stopServer(): Promise<void> {
 
   const transportMode = config.transport.mode;
 
-  if (transportMode === 'sse') {
+  if (transportMode === 'dual') {
+    await Promise.all([
+      httpServer.stop(),
+      streamableHttpServer.stop(),
+    ]);
+  } else if (transportMode === 'sse') {
     await httpServer.stop();
   } else if (transportMode === 'streamable_http') {
     await streamableHttpServer.stop();

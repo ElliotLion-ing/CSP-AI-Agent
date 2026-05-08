@@ -1,14 +1,27 @@
 # CSP AI Agent Release Check Checklist
 
-**版本：** 1.3.0  
+**版本：** 1.4.0  
 **类型：** 发布前手动 Release Check（Human-in-the-loop）  
 **触发方式：** 每次发布到生产环境前，必须先在 **dev 环境**手动通知 Agent 按照本 checklist 执行  
-**测试目标：** 验证 CSP AI Agent 核心行为链路、关键 Bug 修复、md 引用懒加载链路正确性  
+**测试目标：** 验证 CSP AI Agent 核心行为链路、关键 Bug 修复、md 引用懒加载链路正确性，以及 Codex 双客户端兼容性  
 **报告存放：** `Test/Release Check/Reports/release-check-report-YYYY-MM-DD.md`
 
 ---
 
 > ⚠️ **强制要求**：每次 npm 发布并通知服务端部署 dev 环境完成后，**必须先执行本 checklist 全部 Case 并通过，才能发布到生产环境**。
+
+---
+
+## 客户端分区说明
+
+本 checklist 分两个测试分区执行：
+
+| 分区 | 客户端 | 执行环境 | MCP 连接方式 |
+|------|--------|---------|------------|
+| **Part A**（Case 1–10） | **Cursor** | Cursor IDE Agent | SSE via `~/.cursor/mcp.json` |
+| **Part B**（Case C1–C10 + Codex 专项） | **Codex** | Codex CLI Agent | SSE via `~/.codex/config.toml` |
+
+Part A 和 Part B 均须全部通过，方可发布生产环境。
 
 ---
 
@@ -419,8 +432,10 @@ resolve_prompt_content(resource_id: "<winzr-cpp-expert 的 id>", resource_path: 
 
 ## 测试执行顺序
 
+### Part A：Cursor 客户端（Case 1–10）
+
 ```
-前置：快照订阅状态
+前置：快照订阅状态（Cursor）
   ↓
 Case 1：全量 incremental sync
   ↓
@@ -440,7 +455,27 @@ Case 7：Telemetry 计数
   ↓
 Case 9：取消订阅 MCP 资源 → mcp.json 条目清理
   ↓
-Case 10：winzr-cpp-expert md 引用懒加载链路验证 🆕
+Case 10：winzr-cpp-expert md 引用懒加载链路验证
+  ↓
+收尾：恢复订阅状态到测试前快照
+```
+
+### Part B：Codex 客户端（Case C0 专项 + Case C1–C10 回归）
+
+```
+前置：Codex 环境就绪检查（Case C0）
+  ↓
+Case C0-1：config.toml MCP 配置验证
+  ↓
+Case C0-2 Phase 1：sync 注入 developer_instructions + 写入检查点
+  ↓
+⚠️ 用户重启 Codex（必须步骤，policy 生效的前提）
+  ↓
+Case C0-2 Phase 2：（新会话）用户输入恢复指令 → Agent 读检查点 → 验证路由规则生效
+  ↓
+Case C0-3：Skill 运行验证（zoom-build sync + 文件写入）
+  ↓
+Case C1–C10：与 Cursor Part A 相同的 10 个 Case（在 Codex 中重跑）
   ↓
 收尾：恢复订阅状态到测试前快照
 ```
@@ -460,11 +495,257 @@ Case 10：winzr-cpp-expert md 引用懒加载链路验证 🆕
 
 ---
 
+## Part B：Codex 客户端专项 Check
+
+> **执行方式：** 在 Codex CLI 会话中，由 Codex Agent 执行以下所有 Case。  
+> **前置条件：** `~/.codex/config.toml` 中已配置 `[mcp_servers.csp-ai-agent]`，Codex 已重启使配置生效。
+
+---
+
+### Case C0：Codex 环境就绪检查（专属于 Codex，Cursor 无此 Case）
+
+---
+
+#### Case C0-1：config.toml MCP 配置验证
+
+**目的：** 确认 `~/.codex/config.toml` 中 `csp-ai-agent` 配置格式正确，且 Codex 能成功连接到 MCP Server。
+
+**AI 执行步骤：**
+
+```bash
+# Step 1：读取 config.toml 中的 csp-ai-agent 配置节
+grep -A 5 "\[mcp_servers.csp-ai-agent\]" ~/.codex/config.toml
+```
+
+**结果对照表：**
+
+| 验证项 | 预期行为 | 实际结果 | 通过？ |
+|--------|----------|----------|--------|
+| 配置节存在 | `[mcp_servers.csp-ai-agent]` 节在 config.toml 中存在 | | |
+| url 字段正确 | `url = "https://zct-dev.zoomdev.us/csp-agent/sse"`（dev）或 prod endpoint | | |
+| http_headers 包含 Authorization | `http_headers` 中含有 `Authorization = "Bearer ..."` | | |
+| MCP 连接成功 | 在 Codex 中调用任意工具（如 `manage_subscription`）返回正常结果，不报 connection error | | |
+
+---
+
+#### Case C0-2：Rule 生效验证（csp-ai-prompts policy 注入）
+
+**目的：** 验证订阅 `csp-ai-prompts` rule 后，sync 生成的 policy 通过 `merge_toml` action 注入到 `~/.codex/config.toml` 的 `developer_instructions` 字段，并且 Codex Agent **重启后**的新会话中该路由规则实际生效。
+
+> ⚠️ **本 Case 横跨重启边界，分为重启前（Phase 1）和重启后（Phase 2）两个阶段。**  
+> Phase 1 在当前会话中完成注入并保存检查点，然后用户重启 Codex；  
+> Phase 2 在新会话中由用户输入恢复指令，Agent 读取检查点后继续验证。
+
+---
+
+**Phase 1（重启前，在当前 Codex 会话中执行）**
+
+**Step C0-2-1：执行 sync，检查并应用 merge_toml action**
+
+模拟用户语句：
+> "小助手，帮我同步一下我的所有资源"
+
+**AI 执行路径验证：**
+1. 调用 `sync_resources(mode: "incremental", scope: "global")`
+2. 检查返回的 `local_actions_required` 中是否包含 `merge_toml` action
+3. 若有 `merge_toml` action，按指令更新 `~/.codex/config.toml` 的 `developer_instructions` 字段
+4. 执行文件系统验证（见下表）
+
+```bash
+# 验证 developer_instructions 已写入
+grep -A 5 "developer_instructions" ~/.codex/config.toml
+```
+
+| 验证项 | 预期行为 | 实际结果 | 通过？ |
+|--------|----------|----------|--------|
+| sync 返回包含 merge_toml action | `local_actions_required` 中有 `action: "merge_toml"` | | |
+| merge_toml 路径指向 config.toml | `path = "~/.codex/config.toml"` | | |
+| merge_toml key 为 developer_instructions | `key = "developer_instructions"` | | |
+| developer_instructions 写入成功 | `~/.codex/config.toml` 中包含 `developer_instructions` 字段 | | |
+| policy 内容包含 CSP 路由规则 | developer_instructions 值中含有 "manage_subscription" 或 "CSP" 相关路由指令 | | |
+
+**Step C0-2-2：保存 Release Check 重启检查点**
+
+在应用 merge_toml 完成后，AI **必须**将当前进度写入检查点文件，然后提示用户重启：
+
+```bash
+# AI 执行：写入检查点文件
+cat > ~/.codex/release-check-checkpoint.md << 'EOF'
+# CSP Release Check 重启检查点
+
+**状态：** 等待 Phase 2 验证
+**当前进度：** Case C0-2 Phase 1 已完成，developer_instructions 已注入，等待重启后继续
+**下一步：** Case C0-2 Phase 2 — 验证 csp-ai-prompts 路由规则在新会话中生效
+
+## Phase 1 结果（重启前）
+
+- sync 执行：✅ 已完成
+- merge_toml action 返回：[填入实际结果]
+- developer_instructions 写入：✅ 已确认
+- config.toml 路径：~/.codex/config.toml
+
+## Phase 2 待验证项
+
+1. 在新会话中输入：「帮我 review 一下这个 MR」
+2. 观察 Codex Agent 是否主动调用 manage_subscription(action: list)
+3. 观察是否命中 zoom-code-review → 调用 resolve_prompt_content
+4. 验证整个 C1–C10 Case 的行为与 Cursor 一致
+
+## 恢复方式
+
+重启 Codex 后，在新会话中输入：
+「继续 Release Check，从 Case C0-2 Phase 2 开始」
+EOF
+echo "检查点已写入 ~/.codex/release-check-checkpoint.md"
+```
+
+**Step C0-2-3：提示用户重启 Codex**
+
+AI 在完成上述步骤后，**必须**向用户展示以下提示，然后停止当前会话的 Release Check 流程：
+
+```
+✅ developer_instructions 已成功注入 ~/.codex/config.toml
+
+⚠️ 需要重启 Codex 使路由规则生效。
+
+【重启步骤】
+1. 退出当前 Codex 会话（Ctrl+C 或关闭窗口）
+2. 重新启动 Codex：codex
+3. 在新会话中输入以下恢复指令：
+
+   「继续 Release Check，从 Case C0-2 Phase 2 开始」
+
+Codex 将自动读取检查点文件并继续验证路由规则是否生效。
+检查点文件位置：~/.codex/release-check-checkpoint.md
+```
+
+---
+
+**Phase 2（重启后，在新 Codex 会话中执行）**
+
+**恢复触发语句（用户在新会话中输入）：**
+> "继续 Release Check，从 Case C0-2 Phase 2 开始"
+
+**AI 恢复步骤：**
+1. 读取检查点文件 `~/.codex/release-check-checkpoint.md`，确认上次进度
+2. 向用户确认："检测到 Release Check 检查点，Phase 1 已完成，现在开始 Phase 2 验证"
+3. 执行 Phase 2 验证（见下）
+
+**Step C0-2-4：验证路由规则在新会话中实际生效**
+
+模拟用户语句：
+> "帮我 review 一下这个 MR"（已订阅 `zoom-code-review`）
+
+**预期 AI 执行路径：**
+1. Codex Agent **主动**调用 `manage_subscription(action: list)` ← 这是 csp-ai-prompts rule 生效的直接证明
+2. 订阅列表中命中 `zoom-code-review` → 调用 `resolve_prompt_content`
+3. 按 zoom-code-review Skill 执行，**不**直接调用 helper 或本地工具
+
+**Step C0-2-5：验证「呼叫小助手」触发路由**
+
+模拟用户语句：
+> "小助手，帮我出个包"（已订阅 `zoom-build`）
+
+**预期 AI 执行路径：**
+1. 识别唤起词「小助手」
+2. **主动**调用 `manage_subscription(action: list)` ← 验证规则对唤起词也生效
+3. 命中 `zoom-build` → 调用 `resolve_prompt_content`
+
+| 验证项 | 预期行为 | 实际结果 | 通过？ |
+|--------|----------|----------|--------|
+| 检查点读取成功 | AI 能读取并复述上次进度 | | |
+| 路由规则生效（review 触发） | 先调用 `manage_subscription(list)` 再命中 zoom-code-review | | |
+| 不跳过 CSP 检查 | 不直接使用 helper 或本地工具 | | |
+| 唤起词触发路由（小助手 + 出包） | 先调用 `manage_subscription(list)` 再命中 zoom-build | | |
+| csp-ai-prompts 规则可追溯 | 调用链行为与 rule 中定义的优先级逻辑一致 | | |
+
+**Step C0-2-6：清理检查点文件**
+
+Phase 2 验证全部通过后，AI 删除检查点文件：
+
+```bash
+rm ~/.codex/release-check-checkpoint.md
+echo "检查点已清理，继续 Case C0-3"
+```
+
+**⚠️ 若 Phase 2 验证失败：** 记录失败详情到 Report，不得清理检查点文件，以便复现排查。
+
+---
+
+#### Case C0-3：Skill 运行验证（zoom-build sync + 文件写入）
+
+**目的：** 验证 Codex profile 下，skill 文件写入路径与 Cursor 一致（均写入 `~/.csp-ai-agent/skills/`），且 scripts 可执行权限正确。
+
+模拟用户语句（在 Codex 中执行）：
+> "小助手，帮我 sync 一下 zoom-build"
+
+**AI 执行路径验证：**
+1. 调用 `sync_resources(mode: "incremental", resource_ids: ["6dea7a2c8cf83e5d227ee39035411730"])`
+2. 检查 `local_actions_required` 中的 `write_file` action，确认路径为 `~/.csp-ai-agent/skills/zoom-build/`（与 Cursor **相同**路径）
+3. 执行 write_file actions，写入 scripts 和 teams 文件
+
+**文件系统验证：**
+
+```bash
+ls ~/.csp-ai-agent/skills/zoom-build/scripts/
+ls ~/.csp-ai-agent/skills/zoom-build/teams/
+# 验证脚本可执行权限
+ls -la ~/.csp-ai-agent/skills/zoom-build/scripts/build-cli
+```
+
+| 验证项 | 预期行为 | 实际结果 | 通过？ |
+|--------|----------|----------|--------|
+| sync 正常返回 | success: true，details 包含 zoom-build | | |
+| write_file 路径与 Cursor 一致 | 路径为 `~/.csp-ai-agent/skills/zoom-build/`（不是 `~/.codex/...`） | | |
+| scripts 目录存在 | `~/.csp-ai-agent/skills/zoom-build/scripts/` 含 build-cli 等文件 | | |
+| teams 目录存在 | `~/.csp-ai-agent/skills/zoom-build/teams/` 含 JSON 配置文件 | | |
+| build-cli 可执行权限 | `-rwxr-xr-x`（755）| | |
+| 无 merge_toml 用于 skill 路径 | skill 文件全部通过 write_file，不混入 merge_toml | | |
+
+---
+
+### Case C1–C10：Codex 平台回归测试
+
+> 与 Part A（Cursor）完全相同的 10 个 Case，在 Codex CLI Agent 中重新执行。
+>
+> **执行方式：** 在 Codex 会话中，输入与 Part A 相同的模拟用户语句，验证相同的预期行为。
+>
+> **Codex 特有差异点（执行前知悉）：**
+> - Case 9（acm 取消订阅）：验证 `~/.codex/config.toml` 中是否有对应 `[mcp_servers.acm]` 条目被清理（而非 `~/.cursor/mcp.json`）
+> - Case C0-2 中 `developer_instructions` 已写入，是 Codex 与 Cursor 的核心区别
+> - 其余 Case 行为应与 Cursor 完全一致
+
+| Case | 说明 | Codex 特有验证点 | 通过？ |
+|------|------|----------------|--------|
+| C1 | 全量 incremental sync | 同 Cursor；额外确认无 Cursor 特有路径写入（无 `~/.cursor/rules/` 写入） | |
+| C2 | 单资源 sync | 同 Cursor | |
+| C3 | 复杂 Skill sync（zoom-build） | 验证 Case C0-3 路径一致性 | |
+| C4 | 搜索 → 订阅 → Prompt 刷新 | 同 Cursor | |
+| C5 | 取消订阅 → 文件清理 | zoom-build 目录清理路径同 Cursor（`~/.csp-ai-agent/`） | |
+| C6 | 模糊调用路由（CSP 优先） | 验证 policy 注入生效（见 C0-2），Codex Agent 主动调用 manage_subscription | |
+| C7 | Telemetry 计数 | 额外验证 telemetry payload 中 `agent_profile = "codex"` | |
+| C8 | Sync 内容一致性 | 同 Cursor（manifest 版本验证） | |
+| C9 | 取消订阅 MCP 资源 | **Codex 特有**：验证 `config.toml` 中对应 `[mcp_servers.<name>]` 节被清理，而非 mcp.json | |
+| C10 | winzr-cpp-expert 懒加载链路 | 同 Cursor，验证 md 引用替换和 resource_path 子调用 | |
+
+**Telemetry agent_profile 专项验证（Case C7 扩展）：**
+
+在 Codex 中调用任意资源后，验证 telemetry 数据中 `agent_profile` 字段值为 `"codex"`：
+
+| 验证项 | 预期行为 | 实际结果 | 通过？ |
+|--------|----------|----------|--------|
+| telemetry 调用成功 | `usage_tracked: true` | | |
+| agent_profile 字段 | payload 中 `agent_profile = "codex"`（不是 `"cursor"`） | | |
+
+---
+
 ## 注意事项
 
 1. **本 checklist 为手动 Agent 交互测试**，AI 根据用户的自然语言触发，不是自动化脚本
 2. **AI 不得提前告知用户它将做什么操作**，应模拟真实响应链路
 3. **订阅快照必须在第一步记录**，测试过程中不得覆盖
-4. **Case 10 为 Bug 回归验证**，是本版本发布的关键 Check 项，必须通过
-5. **Case 9 执行后**必须在收尾阶段重新订阅 `acm` 并 sync，以恢复 mcp.json 配置
-6. **所有 Case 结果填写到 Report 文件中**：`Test/Release Check/Reports/release-check-report-YYYY-MM-DD.md`
+4. **Case 10 / C10 为 Bug 回归验证**，是本版本发布的关键 Check 项，必须通过
+5. **Case 9 / C9 执行后**必须在收尾阶段重新订阅 `acm` 并 sync，以恢复配置
+6. **Case C0-2 横跨重启边界**：Phase 1 完成注入后，AI 必须写入检查点文件 `~/.codex/release-check-checkpoint.md` 并提示用户重启 Codex。重启后用户输入「继续 Release Check，从 Case C0-2 Phase 2 开始」触发 Phase 2 验证。Phase 2 验证通过后 AI 删除检查点文件
+7. **Part B Case C7 必须验证 `agent_profile = "codex"`**：这是 CODEX-001 核心 telemetry 验证项
+8. **所有 Case 结果填写到 Report 文件中**：`Test/Release Check/Reports/release-check-report-YYYY-MM-DD.md`，Part A 和 Part B 分区记录
