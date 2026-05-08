@@ -144,12 +144,42 @@ export interface CheckFileAction {
   resource_type: string;
 }
 
+/**
+ * Instructs the AI Agent to merge or update a key inside a TOML config file.
+ *
+ * Primary use-case: injecting CSP routing policy content into Codex's
+ * `developer_instructions` field in `~/.codex/config.toml`.
+ *
+ * Merge semantics:
+ * - When the key does not exist: create it with `value`.
+ * - When the key already exists and `overwrite` is false: skip (idempotent).
+ * - When the key already exists and `overwrite` is true: replace the value.
+ *
+ * The AI Agent is responsible for reading, patching, and re-writing the file.
+ * The server must never write to the user's local filesystem directly.
+ */
+export interface MergeTomlAction {
+  action: 'merge_toml';
+  /** Absolute path to the TOML file (may start with ~). */
+  toml_path: string;
+  /** Dot-notation key path in the TOML document (e.g. `developer_instructions`). */
+  key: string;
+  /** String value to set for the key. */
+  value: string;
+  /**
+   * When true, replace an existing key value; when false, skip if the key
+   * already has a non-empty value (safe default: false).
+   */
+  overwrite: boolean;
+}
+
 export type LocalAction =
   | WriteFileAction
   | DeleteFileAction
   | MergeMcpJsonAction
   | RemoveMcpJsonEntryAction
-  | CheckFileAction;
+  | CheckFileAction
+  | MergeTomlAction;
 
 // Tool Handler Function Type (generic, accepts any params and returns any result)
 export type ToolHandler = (params: unknown) => Promise<ToolResult>;
@@ -188,6 +218,13 @@ export interface SyncResourcesParams {
    * makes API calls with their own identity.
    */
   user_token?: string;
+  /**
+   * Identifies which AI client is requesting the sync.
+   * When provided, resource distribution will follow the corresponding
+   * ClientAdapter paths and strategies.
+   * Defaults to 'cursor' when absent for backward compatibility.
+   */
+  agent_profile?: 'cursor' | 'codex';
   /**
    * List of MCP server names that are already configured in the user's
    * ~/.cursor/mcp.json. The server will skip downloading and generating
@@ -286,6 +323,22 @@ export interface SyncResourcesResult {
    * user.  See LocalAction type variants for details.
    */
   local_actions_required?: LocalAction[];
+  /**
+   * When true, the client agent must be restarted for the synced policies to
+   * take effect.  Present when a Codex `merge_toml` action has been issued
+   * for `developer_instructions`.
+   *
+   * The AI Agent MUST notify the user to restart Codex manually before
+   * reporting sync completion.
+   */
+  restart_required?: boolean;
+  /**
+   * Human-readable hint explaining why a restart is required and what command
+   * the user should run.  Only present when restart_required is true.
+   *
+   * Example: "请重启 Codex 以使 CSP routing policy 生效：codex"
+   */
+  restart_hint?: string;
 }
 
 // manage_subscription

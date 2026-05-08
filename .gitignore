@@ -71,3 +71,4 @@ SourceCode/ai-resource-telemetry.json
 
 # JWT tokens (sensitive)
 Test/CSP-Jwt-token.json
+.gitnexus

@@ -6,6 +6,7 @@
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 import * as fs from 'fs';
+import type { AgentProfile } from '../client-adapters/index.js';
 
 // Load .env file if exists
 // Try multiple paths to find .env file
@@ -39,8 +40,15 @@ export interface Config {
 
   // Transport
   transport: {
-    mode: 'stdio' | 'sse';
+    mode: 'stdio' | 'sse' | 'streamable_http';
   };
+
+  /**
+   * Identifies which AI client this server instance is serving.
+   * Set via the CSP_AGENT_PROFILE environment variable.
+   * Defaults to 'cursor' for backward compatibility.
+   */
+  agentProfile: AgentProfile;
 
   // HTTP Server (for SSE transport)
   http?: {
@@ -159,12 +167,14 @@ function getEnvBoolean(key: string, defaultValue: boolean): boolean {
 export function loadConfig(): Config {
   const nodeEnv = (process.env.NODE_ENV || 'development') as Config['nodeEnv'];
   const logLevel = (process.env.LOG_LEVEL || 'info') as Config['logLevel'];
-  const transportMode = (process.env.TRANSPORT_MODE || 'stdio') as 'stdio' | 'sse';
+  const transportMode = (process.env.TRANSPORT_MODE || 'stdio') as Config['transport']['mode'];
+  const agentProfile = (process.env.CSP_AGENT_PROFILE === 'codex' ? 'codex' : 'cursor') as AgentProfile;
 
   return {
     nodeEnv,
     port: getEnvNumber('PORT', 5090),
     logLevel,
+    agentProfile,
 
     transport: {
       mode: transportMode,

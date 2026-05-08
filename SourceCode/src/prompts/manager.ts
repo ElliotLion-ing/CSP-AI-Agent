@@ -115,6 +115,13 @@ export class PromptManager {
   private readonly userSyncActions = new Map<string, LocalAction[]>();
 
   /**
+   * Per-user cache of restart hints from Codex policy injection.
+   * Populated after a sync that emitted merge_toml actions requiring a restart.
+   * Consumed and cleared when the setup prompt is fetched.
+   */
+  private readonly userRestartHints = new Map<string, string>();
+
+  /**
    * Tracks which Server instances already have handlers installed.
    * Each SSE connection creates a new Server instance, so we track per-instance
    * rather than using a global boolean flag (which would skip registration on
@@ -191,6 +198,32 @@ export class PromptManager {
       },
       'PromptManager: cached local_actions_required for user (will be served via csp-ai-agent-setup)',
     );
+  }
+
+  /**
+   * Store a restart hint for the given user.
+   * Called when sync_resources produces merge_toml actions that require a
+   * Codex session restart to take effect.
+   */
+  storeRestartHint(userToken: string, hint: string): void {
+    this.userRestartHints.set(userToken, hint);
+    logger.info(
+      { userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous' },
+      'PromptManager: cached restart_hint for user',
+    );
+  }
+
+  /**
+   * Consume and return the cached restart hint for a user.
+   * Returns undefined if no hint is cached.
+   * The cache is cleared after retrieval.
+   */
+  consumeRestartHint(userToken: string): string | undefined {
+    const hint = this.userRestartHints.get(userToken);
+    if (hint !== undefined) {
+      this.userRestartHints.delete(userToken);
+    }
+    return hint;
   }
 
   /**
@@ -485,6 +518,8 @@ export class PromptManager {
         // immediately without needing to call sync_resources first.
         const cachedActions = this.consumeSyncActions(setupToken);
         const hasCachedActions = cachedActions && cachedActions.length > 0;
+        // Consume restart hint (Codex only — set when merge_toml actions were emitted).
+        const restartHint = this.consumeRestartHint(setupToken);
 
         logger.info(
           {
@@ -501,6 +536,10 @@ export class PromptManager {
         // Build the action-execution instructions section.
         // When cached actions are available, embed them directly so the AI can
         // execute them without an extra sync_resources round-trip.
+        const restartSection = restartHint
+          ? `\n\n⚠️ **Restart required**: ${restartHint}\n`
+          : '';
+
         const actionInstructions = hasCachedActions
           ? (
             `### Step 1 — Apply these local actions NOW\n` +
@@ -512,11 +551,15 @@ export class PromptManager {
             `Expand \`~\` to the user's home directory. Create parent directories if needed.\n` +
             `- **\`merge_mcp_json\`**: Read \`~/.cursor/mcp.json\` (create if missing), ` +
             `add or update \`mcpServers[server_name]\` with the \`entry\` object. Do not remove existing entries.\n` +
+            `- **\`merge_toml\`**: Read the TOML file at \`toml_path\` (create if missing), ` +
+            `set or update the \`key\` (dot-notation) to \`value\`. When \`overwrite\` is false, ` +
+            `skip if the key already has a non-empty value. Write the file back.\n` +
             `- **\`delete_file\`**: Delete the file or directory at \`path\`. ` +
             `If \`recursive\` is true, delete the directory recursively. Skip if not found.\n` +
             `- **\`remove_mcp_json_entry\`**: Read \`~/.cursor/mcp.json\`, ` +
-            `remove \`mcpServers[server_name]\` if it exists, then write the file back.\n\n` +
-            `### Step 2 — Report\n`
+            `remove \`mcpServers[server_name]\` if it exists, then write the file back.\n` +
+            restartSection +
+            `\n### Step 2 — Report\n`
           )
           : (
             `### Step 1 — Sync AI resources\n` +

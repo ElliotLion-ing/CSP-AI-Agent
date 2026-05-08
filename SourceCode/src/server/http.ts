@@ -16,6 +16,7 @@ import {
 import { syncResources } from '../tools/sync-resources.js';
 import { telemetry } from '../telemetry/index.js';
 import { promptManager } from '../prompts/index.js';
+import type { AgentProfile } from '../client-adapters/index.js';
 
 // Inject syncResources into promptManager for post-restart recovery.
 // Must be done after both modules are loaded to avoid circular-import issues.
@@ -142,107 +143,6 @@ export class HTTPServer {
         message: `POST ${basePath}/message?sessionId=<id>`,
       },
     }));
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // MCP Server factory
-  // ─────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Creates a new SDK Server instance and registers all tools from toolRegistry.
-   * A fresh instance is created per SSE connection so that each session is
-   * isolated (matching ACM's createMCPServer-per-connection pattern).
-   */
-  private createMcpServer(userId?: string, email?: string, groups?: string[], userToken?: string): Server {
-    const server = new Server(
-      { name: 'csp-ai-agent-mcp', version: '0.2.0' },
-      // Declare prompts, tools, and logging capabilities only.
-      // REMOVED resources capability to align with async-pilot's working implementation.
-      // Cursor should use standard prompts/get instead of probing prompt:// as resources.
-      { capabilities: { tools: {}, prompts: {}, logging: {} } }
-    );
-
-    // Install Prompt list/get handlers synchronously on this Server instance.
-    // Pass userToken so GetPrompt can attribute telemetry to the correct user.
-    promptManager.installHandlers(server, userToken);
-
-    // tools/list
-    server.setRequestHandler(ListToolsRequestSchema, () => ({
-      tools: toolRegistry.getMCPToolDefinitions(),
-    }));
-
-    // Auto-sync subscribed resources once the MCP handshake is fully complete.
-    // Runs in the background so it never blocks the connection setup.
-    server.oninitialized = () => {
-      logger.info({ userId }, 'MCP initialized — triggering background sync_resources');
-      // Flush any pending telemetry immediately on (re)connect so events from
-      // before a disconnect are not held until the next 10-second tick.
-      telemetry.flushOnReconnect();
-      // eslint-disable-next-line @typescript-eslint/require-await
-      void syncResources({ mode: 'incremental', scope: 'global', user_token: userToken }).then(async (result) => {
-        if (result.success) {
-          logger.info(
-            { userId, synced: result.data?.summary?.synced, cached: result.data?.summary?.cached },
-            'Auto sync_resources on connect completed'
-          );
-          // If the sync result includes local_actions_required (Rule files /
-          // MCP entries that must be written on the user's local machine),
-          // cache them in PromptManager.  They will be embedded directly into
-          // the csp-ai-agent-setup prompt content the next time the AI calls
-          // GetPrompt for that prompt, so the AI receives them without needing
-          // to call sync_resources again and without relying on sendLoggingMessage
-          // (which is unreliable — the connection may already be closed by then).
-          const actions = result.data?.local_actions_required;
-          if (actions && actions.length > 0) {
-            promptManager.storeSyncActions(userToken ?? '', actions);
-          }
-        } else {
-          logger.warn({ userId, error: result.error }, 'Auto sync_resources on connect failed');
-        }
-      }).catch((err) => {
-        logger.error({ userId, error: err instanceof Error ? err.message : String(err) }, 'Auto sync_resources on connect threw an error');
-      });
-    };
-
-    // tools/call
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const { name, arguments: args = {} } = request.params;
-
-      // Permission check when user context is available
-      if (userId && groups && groups.length > 0) {
-        const permCheck = checkToolCallPermission(name, { userId, email: email ?? '', groups });
-        if (!permCheck.allowed) {
-          return {
-            content: [{ type: 'text' as const, text: `Permission denied: ${permCheck.reason}` }],
-            isError: true,
-          };
-        }
-      }
-
-      // Inject the authenticated token so every tool can call the CSP API without
-      // requiring the AI to know about or pass user_token explicitly.
-      // The AI-supplied user_token (if any) takes precedence; otherwise we fall back
-      // to the token from the SSE connection that created this session.
-      const enrichedArgs: Record<string, unknown> = {
-        user_token: userToken,
-        ...args,
-      };
-
-      try {
-        const result = await toolRegistry.callTool(name, enrichedArgs);
-        const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-        return { content: [{ type: 'text' as const, text }] };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error({ toolName: name, err }, 'Tool execution failed');
-        return {
-          content: [{ type: 'text' as const, text: `Error: ${msg}` }],
-          isError: true,
-        };
-      }
-    });
-
-    return server;
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -382,7 +282,7 @@ export class HTTPServer {
         logger.warn({ sdkSessionId, error: err.message }, 'SSE transport error');
       };
 
-      const mcpServer = this.createMcpServer(
+      const mcpServer = createMcpServerInstance(
         request.user?.userId,
         request.user?.email,
         request.user?.groups,
@@ -561,3 +461,107 @@ export class HTTPServer {
 
 // Singleton instance (initialized without cache manager initially)
 export const httpServer = new HTTPServer();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared MCP Server factory
+// Exported so that stdio transport in server.ts can reuse the same
+// initialization logic (promptManager, tools, oninitialized auto-sync)
+// without duplicating handler registration.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Creates a fully-initialized MCP SDK Server instance with all tools,
+ * prompt handlers, and the oninitialized auto-sync hook wired up.
+ *
+ * Used by both the SSE transport (per-connection in HTTPServer) and the
+ * stdio transport (single instance in server.ts).
+ */
+export function createMcpServerInstance(
+  userId?: string,
+  email?: string,
+  groups?: string[],
+  userToken?: string,
+  agentProfile?: AgentProfile,
+): Server {
+  // Resolve the active profile: caller > server-wide config > default 'cursor'.
+  const resolvedProfile: AgentProfile = agentProfile ?? config.agentProfile ?? 'cursor';
+  const server = new Server(
+    { name: 'csp-ai-agent-mcp', version: '0.2.0' },
+    { capabilities: { tools: {}, prompts: {}, logging: {} } },
+  );
+
+  promptManager.installHandlers(server, userToken);
+
+  server.setRequestHandler(ListToolsRequestSchema, () => ({
+    tools: toolRegistry.getMCPToolDefinitions(),
+  }));
+
+  server.oninitialized = () => {
+    logger.info({ userId, agentProfile: resolvedProfile }, 'MCP initialized — triggering background sync_resources');
+    telemetry.flushOnReconnect();
+    void syncResources({
+      mode: 'incremental',
+      scope: 'global',
+      user_token: userToken,
+      agent_profile: resolvedProfile,
+    }).then(async (result) => {
+      if (result.success) {
+        logger.info(
+          { userId, synced: result.data?.summary?.synced, cached: result.data?.summary?.cached },
+          'Auto sync_resources on connect completed',
+        );
+        const actions = result.data?.local_actions_required;
+        if (actions && actions.length > 0) {
+          // For Codex: storeSyncActions also caches merge_toml and restart_hint
+          // so the AI can pick them up via the csp-ai-agent-setup prompt.
+          promptManager.storeSyncActions(userToken ?? '', actions);
+        }
+        // Cache restart_required/restart_hint so the next GetPrompt delivers them.
+        if (result.data?.restart_required && result.data?.restart_hint) {
+          promptManager.storeRestartHint(userToken ?? '', result.data.restart_hint);
+        }
+      } else {
+        logger.warn({ userId, error: result.error }, 'Auto sync_resources on connect failed');
+      }
+    }).catch((err) => {
+      logger.error(
+        { userId, error: err instanceof Error ? err.message : String(err) },
+        'Auto sync_resources on connect threw an error',
+      );
+    });
+  };
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args = {} } = request.params;
+
+    if (userId && groups && groups.length > 0) {
+      const permCheck = checkToolCallPermission(name, { userId, email: email ?? '', groups });
+      if (!permCheck.allowed) {
+        return {
+          content: [{ type: 'text' as const, text: `Permission denied: ${permCheck.reason}` }],
+          isError: true,
+        };
+      }
+    }
+
+    const enrichedArgs: Record<string, unknown> = {
+      user_token: userToken,
+      ...args,
+    };
+
+    try {
+      const result = await toolRegistry.callTool(name, enrichedArgs);
+      const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+      return { content: [{ type: 'text' as const, text }] };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ toolName: name, err }, 'Tool execution failed');
+      return {
+        content: [{ type: 'text' as const, text: `Error: ${msg}` }],
+        isError: true,
+      };
+    }
+  });
+
+  return server;
+}
