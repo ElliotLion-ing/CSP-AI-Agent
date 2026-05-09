@@ -198,6 +198,58 @@ git push origin main
 
 ### 5. 发布流程规范
 
+**执行前必须先判断当前所在分支：**
+
+```
+当前分支 == main / release 分支？
+  → 走【正式发布流程】（见下）
+当前分支 == dev / feature 分支？
+  → 走【Dev 包发布流程】（见下）
+```
+
+---
+
+#### 【Dev 包发布流程】（当前分支为 dev / feature 分支时强制执行）
+
+**包名、版本号、tag 规则：**
+
+| 字段 | 规则 | 示例 |
+|------|------|------|
+| 包名 | `@elliotding/ai-agent-mcp-dev`（独立 dev 包，不得用产线包名） | — |
+| 版本号 | `<MAJOR>.<MINOR>.<PATCH+1>-dev.1`（在下一个产线版本号基础上加 `-dev.1`） | 产线是 `0.2.21` → dev 包版本 `0.2.23-dev.1` |
+| npm tag | `--tag dev`（prerelease 版本必须显式指定，否则 npm 报错） | — |
+
+**执行步骤：**
+
+```bash
+# Step 1: 修改 package.json
+# - name: "@elliotding/ai-agent-mcp-dev"
+# - version: "<next>-dev.1"（如 "0.2.23-dev.1"）
+
+# Step 2: 构建并发布到 dev tag（需用户确认）
+cd SourceCode && npm run build && npm publish --access public --tag dev
+
+# Step 3: 验证（dev tag 指向新版本，latest 不受影响）
+npm view @elliotding/ai-agent-mcp-dev dist-tags
+
+# Step 4: 还原 package.json（发布完成后必须恢复）
+# - name: "@elliotding/ai-agent-mcp"
+# - version: "<next>"（如 "0.2.22"，即产线下一个版本号）
+
+# Step 5: git commit 推送到 dev 分支（需用户确认）
+git add . && git commit -m "chore: bump version to <next>-dev.1 (dev pkg)" && git push origin <dev-branch>
+```
+
+**禁止行为：**
+- ❌ 在 dev 分支用产线包名 `@elliotding/ai-agent-mcp` 发布（会污染产线 latest）
+- ❌ 用 `--tag dev` 发布到产线包名下（会让 `@elliotding/ai-agent-mcp@dev` 指向测试版本）
+- ❌ prerelease 版本（含 `-dev.N`）不加 `--tag dev` 直接发布（npm 会报错）
+- ❌ 发布后忘记将 `package.json` 的包名和版本恢复为产线状态
+
+---
+
+#### 【正式发布流程】（当前分支为 main / release 分支时）
+
 **顺序：npm 发布 → 验证 → Git 提交（不可颠倒）**
 
 ```bash
@@ -446,6 +498,18 @@ Test/Test Reports/FEAT-xxx/
 - **原理**：SKILL.md 是 skill 的"版本标识符"，任何脚本变更都应在 SKILL.md 中体现
 - **预防措施**：增量同步永远以"资源级别"为粒度，不以"文件级别"为粒度
 - **相关规则**：#2（测试验证强制）
+
+#### ERR-2026-05-09-004
+- **错误**：在 dev 分支发包时，使用产线包名 `@elliotding/ai-agent-mcp` + `--tag dev` 发布，导致产线包的 dev tag 被污染
+- **发生时间**：2026-05-09
+- **错误原因**：未区分 dev 分支和 main 分支的发包策略，直接沿用产线发包命令并加 `--tag dev`
+- **正确做法**：
+  - dev 分支发包必须用独立包名 `@elliotding/ai-agent-mcp-dev`
+  - 版本号格式：`<next-version>-dev.N`（如 `0.2.23-dev.1`）
+  - 必须加 `--tag dev`（prerelease 版本 npm 强制要求）
+  - 发布后将 `package.json` 恢复为产线包名和版本
+- **预防措施**：每次发包前先用 `git branch --show-current` 确认当前分支，再根据规则 #5 选择对应发包流程
+- **相关规则**：#5（发布流程规范）
 
 ---
 
