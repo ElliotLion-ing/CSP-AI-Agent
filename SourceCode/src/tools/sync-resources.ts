@@ -651,7 +651,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                     action: 'write_file',
                     path: `${skillDir}/${firstScript.path}`,
                     ...encodeForRender(firstScript.path, firstScript.content),
-                    mode: firstScript.path.includes('/scripts/') ? '0755' : undefined,
+                    mode: firstScript.path.includes('scripts/') ? '0755' : undefined,
                     // Atomic update marker: client checks manifest FIRST
                     is_skill_manifest: true,
                     // SKILL.md content for version comparison (stored separately in .manifests/)
@@ -668,7 +668,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                     action: 'write_file',
                     path: `${skillDir}/${scriptFile.path}`,
                     ...encodeForRender(scriptFile.path, scriptFile.content),
-                    mode: scriptFile.path.includes('/scripts/') ? '0755' : undefined,
+                    mode: scriptFile.path.includes('scripts/') ? '0755' : undefined,
                   });
                 }
                 
