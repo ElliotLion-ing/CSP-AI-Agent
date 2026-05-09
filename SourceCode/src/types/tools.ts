@@ -402,6 +402,13 @@ export interface SearchResourcesParams {
   keyword: string;
   /** CSP API token from the user's mcp.json env configuration. */
   user_token?: string;
+  /**
+   * Identifies the AI client calling this tool.
+   * Used to determine the correct is_installed check path.
+   * 'cursor' (default) → checks ~/.cursor/skills/ etc.
+   * 'codex'            → is_installed derived from prompt registry (no local path check).
+   */
+  agent_profile?: 'cursor' | 'codex';
 }
 
 export interface SearchResourcesResult {

@@ -11,6 +11,8 @@ import { syncResources } from './sync-resources';
 import { uninstallResource } from './uninstall-resource';
 import { promptManager } from '../prompts/index.js';
 import { getCspAgentDirForClient } from '../utils/cursor-paths.js';
+import { adapterRegistry, type AgentProfile } from '../client-adapters/index.js';
+import { config } from '../config/index.js';
 
 export async function manageSubscription(params: unknown): Promise<ToolResult<ManageSubscriptionResult>> {
   const startTime = Date.now();
@@ -115,6 +117,14 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           );
         }
 
+        // Resolve the client adapter: prefer caller-supplied agent_profile, fall
+        // back to server-wide config (set via CSP_AGENT_PROFILE env var).
+        // This mirrors the same resolution logic in sync-resources.ts so that
+        // Codex unsubscribes emit remove_toml_entry instead of remove_mcp_json_entry.
+        const resolvedUnsubProfile: AgentProfile =
+          (typedParams.agent_profile as AgentProfile | undefined) ?? config.agentProfile ?? 'cursor';
+        const unsubClientAdapter = adapterRegistry.get(resolvedUnsubProfile);
+
         logger.debug({ resourceIds: typedParams.resource_ids }, 'Unsubscribing from resources...');
 
         // Build resource_id → type and resource_id → name maps from the current
@@ -168,7 +178,9 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             // find no matching prompts and skip the skill cleanup branch entirely.
             // Instead, we directly build the delete_file local_actions for the AI to execute.
             if (resourceType === 'skill') {
-              const skillDir = `${getCspAgentDirForClient('skills')}/${resourceName}`;
+              // Use adapter-resolved path so Codex cleans ~/.csp-ai-agent/codex/skills/<name>/
+              // instead of the Cursor-only ~/.csp-ai-agent/skills/<name>/.
+              const skillDir = unsubClientAdapter.getSkillDir(resourceName);
               const manifestFile = `${getCspAgentDirForClient('.manifests')}/${resourceName}.md`;
 
               unsubscribeLocalActions.push(
@@ -214,9 +226,11 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
               resource_id_or_name: pattern,
               remove_from_account: false, // already unsubscribed above
               ...(resolvedType ? { resource_type: resolvedType } : {}),
-              // Forward agent_profile so uninstall emits the correct config action
-              // (remove_mcp_json_entry for Cursor, remove_toml_entry for Codex).
-              ...(typedParams.agent_profile ? { agent_profile: typedParams.agent_profile } : {}),
+              // Always forward the resolved agent_profile so uninstall_resource emits
+              // the correct config action:
+              //   Cursor → remove_mcp_json_entry targeting ~/.cursor/mcp.json
+              //   Codex  → remove_toml_entry targeting ~/.codex/config.toml
+              agent_profile: resolvedUnsubProfile,
             });
             if (uninstallResult.success && uninstallResult.data && uninstallResult.data.removed_resources.length > 0) {
               // Collect local_actions_required (e.g. remove_mcp_json_entry for mcp-type resources,

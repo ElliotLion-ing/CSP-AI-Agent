@@ -25,7 +25,6 @@ import {
   getCursorResourcePath,
   getCursorTypeDirForClient,
   getCursorRootDirForClient,
-  getCspAgentDirForClient,
   getCspAgentRootDirForClient,
 } from '../utils/cursor-paths';
 import { MCPServerError } from '../types/errors';
@@ -373,7 +372,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                     });
                     
                     // Check each script file in .csp-ai-agent
-                    const skillDir = `${getCspAgentDirForClient('skills')}/${sub.name}`;
+                    const skillDir = clientAdapter.getSkillDir(sub.name);
                     for (const scriptFile of metadata.script_files) {
                       localActions.push({
                         action: 'check_file',
@@ -634,10 +633,14 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                   source: 'API',
                 });
 
-                // Use isolated directory for complex skills (not ~/.cursor/skills/)
-                // SKILL.md is NOT downloaded — only scripts are cached locally
-                // This prevents Cursor from auto-discovering the skill while enabling script execution
-                const skillDir = `${getCspAgentDirForClient('skills')}/${sub.name}`;
+                // Use client-adapter-resolved directory so Cursor and Codex each get
+                // their own isolated subtree:
+                //   Cursor → ~/.csp-ai-agent/skills/<name>/
+                //   Codex  → ~/.csp-ai-agent/codex/skills/<name>/
+                // SKILL.md is NOT downloaded — only scripts are cached locally.
+                // This prevents the client from auto-discovering the skill while
+                // enabling script execution.
+                const skillDir = clientAdapter.getSkillDir(sub.name);
                 
                 // Generate write_file actions for script files ONLY (exclude SKILL.md)
                 // First script file carries is_skill_manifest marker for atomic update check
@@ -692,7 +695,8 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                     source: 'Git',
                   });
 
-                  const skillDir = `${getCspAgentDirForClient('skills')}/${sub.name}`;
+                  // Use client-adapter-resolved directory (Cursor vs Codex subtree).
+                  const skillDir = clientAdapter.getSkillDir(sub.name);
                   
                   if (metadata.script_files.length > 0) {
                     const firstScript = metadata.script_files[0];
@@ -1240,13 +1244,15 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
           encoding: 'utf8',
         });
 
-        // 2. Inject the policy file reference into developer_instructions
+        // 2. Inject the policy file reference into developer_instructions.
+        // overwrite: true so that each sync refreshes the reference (e.g. policy
+        // file path changed, or first-time injection after a Codex upgrade).
         localActions.push({
           action: 'merge_toml',
           toml_path: tomlPath,
           key: tomlKey,
           value: `Please read and follow the CSP routing policy at: ${policyFile}`,
-          overwrite: false,
+          overwrite: true,
         });
 
         restartRequired = true;

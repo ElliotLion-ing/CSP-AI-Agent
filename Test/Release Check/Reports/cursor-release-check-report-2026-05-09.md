@@ -1,7 +1,7 @@
 # CSP AI Agent Release Check Report（Cursor 客户端）
 
-**日期：** 2026-05-09（第四轮）  
-**版本：** @elliotding/ai-agent-mcp-dev@0.2.24-dev.1（dev 环境）  
+**日期：** 2026-05-09（第五轮）  
+**版本：** @elliotding/ai-agent-mcp-dev@0.2.25-dev.1（dev 环境）  
 **环境：** dev（zct-dev.zoomdev.us）  
 **执行人：** Cursor AI Agent  
 **客户端类型：** Cursor IDE（SSE 连接，`/sse` 端点）  
@@ -14,10 +14,10 @@
 | 项目 | 结果 |
 |------|------|
 | **总 Case 数** | 10 |
-| **PASS** | 9 |
-| **FAIL** | 1 |
+| **PASS** | 10 |
+| **FAIL** | 0 |
 | **SKIP** | 0 |
-| **通过率** | 90% |
+| **通过率** | 100% |
 
 ---
 
@@ -46,12 +46,12 @@
 
 ### Case 1：全量 incremental sync — **PASS**
 
-**操作：** `sync_resources(mode: "incremental")`
+**操作：** `sync_resources(mode: "incremental", scope: "global")`
 
 **结果：**
-- 服务端返回 7 个资源的 `local_actions_required`
-- 所有 `write_file` 动作已手动执行，文件写入成功
-- 资源含 skill SKILL.md、rules、command 配置等
+- 服务端返回 14 个订阅资源的 `local_actions_required`
+- 共 24 个 local actions（22 `write_file` + 2 `merge_mcp_json`）
+- 所有文件写入成功，`acm` 和 `acm-dev` 已合并至 `mcp.json`
 - 无报错，无异常
 
 **结论：** ✅ PASS
@@ -60,51 +60,49 @@
 
 ### Case 2：单资源 sync — **PASS**
 
-**操作：** `sync_resources(mode: "incremental", resource_ids: ["009157d8ed498e93c0dbdbdbd47ae40c"])`（winzr-cpp-expert）
+**操作：** `sync_resources(mode: "incremental", resource_ids: ["632400b351c85024b0385ab3e7fa838d"])`（zoom-code-review）
 
 **结果：**
-- 成功返回 `local_actions_required`，包含 SKILL.md 等文件写入动作
-- 手动执行 `write_file` 后，文件写入 `~/.csp-ai-agent/skills/winzr-cpp-expert/`
+- 成功仅返回 `zoom-code-review` 的 `local_actions_required`（2 个 `write_file`）
+- 不触发其他资源的 local actions
 - 单资源指定过滤功能正常
 
 **结论：** ✅ PASS
 
 ---
 
-### Case 3：复杂 Skill sync（zoom-build 权限验证）— **FAIL**
+### Case 3：复杂 Skill sync（zoom-build 权限验证）— **PASS** ✅（本轮修复验证通过）
 
 **操作：**
 1. 清空本地 zoom-build 目录 `rm -rf ~/.csp-ai-agent/skills/zoom-build/`
 2. `sync_resources(mode: "full", resource_ids: ["6dea7a2c8cf83e5d227ee39035411730"])`
-3. 执行 `local_actions_required` 中的 `write_file` 动作
-4. 检查 `build-cli` 脚本权限
+3. 执行 `local_actions_required` 中的 16 个 `write_file` 动作
+4. 检查所有脚本文件权限
 
 **结果：**
-- `local_actions_required` 返回 9 个文件写入动作
-- **关键发现：** 所有脚本文件（含 `build-cli`、`build-preset` 等）的 `mode` 字段为 `None`
-- 执行 `write_file` 后，`build-cli` 权限为 `644`（期望 `755`）
-- 需要手动 `chmod 755` 才能执行
+- `local_actions_required` 返回 16 个文件写入动作
+- **所有 9 个脚本文件均包含 `mode: "0755"` 字段**（第四轮 FAIL 的关键 Bug 已修复）
+- 执行写入后，`build-cli`、`build-preset`、`build-trigger` 等所有脚本权限均为 `755`
+- 文件总数：9 scripts + 7 team configs + 1 SKILL.md = 全部写入成功
 
-**根本原因：** `@elliotding/ai-agent-mcp-dev@0.2.24-dev.1` 中已修复 `sync-resources.ts` 的 Git fallback 路径 mode 字段逻辑，但**该版本尚未部署到 dev MCP server**。当前 server 仍返回 `mode: None`。
+**修复说明：** 客户端 `sync-resources.ts` API download 路径中将 `path.includes('/scripts/')` 修改为 `path.includes('scripts/')` 移除了前导斜杠，解决了 API 返回路径 `scripts/build-cli`（无前导斜杠）无法被匹配的 Bug。此修复已随 `@elliotding/ai-agent-mcp-dev@0.2.25-dev.1` 部署。
 
-**影响范围：** 仅影响通过 Git fallback 路径下载的资源（API download 返回空文件列表时触发）。
-
-**结论：** ❌ FAIL（待 server 部署 `0.2.24-dev.1` 后重测）
+**结论：** ✅ PASS
 
 ---
 
 ### Case 4：搜索 → 订阅 → Prompt 刷新 — **PASS**
 
 **操作：**
-1. `search_resources(keyword: "changelog-nex")`
-2. 找到目标资源后，`manage_subscription(action: "subscribe", resource_id: <id>)`
-3. `sync_resources(mode: "incremental", resource_ids: [<id>])`
+1. `search_resources(keyword: "android-latest-sdk-artifacts")`
+2. `manage_subscription(action: "subscribe", resource_ids: ["be1a4dca91f6b017fb6eaba0d1356e69"])`
+3. `sync_resources(mode: "incremental", resource_ids: ["be1a4dca91f6b017fb6eaba0d1356e69"])`
 4. `manage_subscription(action: "list")` 验证订阅计数增加
 
 **结果：**
-- 搜索成功找到 `changelog-nex` 资源
+- 搜索成功找到 `android-latest-sdk-artifacts` 资源
 - 订阅成功，订阅列表从 14 → 15 个
-- sync 后文件写入成功
+- sync 后文件写入成功，脚本文件带 `mode: 0755`
 - Prompt 刷新验证通过（`resolve_prompt_content` 可正常调用）
 
 **结论：** ✅ PASS
@@ -114,15 +112,15 @@
 ### Case 5：取消订阅 → Prompt 移除 → 文件清理 — **PASS**
 
 **操作：**
-1. `manage_subscription(action: "unsubscribe", resource_id: <changelog-nex id>)`
-2. `manage_subscription(action: "unsubscribe", resource_id: <zoom-build id>)`
-3. 手动执行 `delete_file` local actions
+1. `manage_subscription(action: "unsubscribe", resource_ids: ["632400b351c85024b0385ab3e7fa838d"])` (zoom-code-review)
+2. `manage_subscription(action: "unsubscribe", resource_ids: ["6dea7a2c8cf83e5d227ee39035411730"])` (zoom-build)
+3. 执行返回的 `delete_file` local actions
 4. 验证本地文件/目录已删除
 
 **结果：**
 - 两个资源取消订阅成功
-- 手动执行 `delete_file` 后，`~/.csp-ai-agent/skills/zoom-build/` 和 `changelog-nex` 相关文件已移除
-- `resolve_prompt_content` 对已取消订阅资源返回 `PROMPT_NOT_FOUND`
+- 手动执行 `delete_file` 后，`~/.csp-ai-agent/skills/zoom-build/` 及 `zoom-code-review` 相关文件已移除
+- `resolve_prompt_content` 对已取消订阅资源返回 `PROMPT_NOT_FOUND`，行为符合预期
 
 **备注：** 服务端有传播延迟，`manage_subscription(list)` 可能短暂仍显示已取消资源。
 
@@ -133,14 +131,14 @@
 ### Case 6：模糊调用路由 — **PASS**
 
 **操作：**
-1. 订阅状态下调用 `resolve_prompt_content` for `zoom-code-review` → 验证正常路由
-2. 临时取消订阅 `zoom-code-review` → 验证 fallback 机制
-3. 重新订阅恢复
+1. 重新订阅并 sync `zoom-code-review`
+2. 发起模糊请求（"帮我 review MR"）
+3. 验证路由流程：先 `manage_subscription(list)` → 命中 `zoom-code-review` → 调用 `resolve_prompt_content`
 
 **结果：**
-- 已订阅状态：`resolve_prompt_content` 成功返回 SKILL.md 内容
-- 未订阅状态：`resolve_prompt_content` 返回 `PROMPT_NOT_FOUND`，fallback 机制触发正常
-- 重新订阅后 `sync_resources` 恢复 prompt 注册
+- 已订阅状态：`resolve_prompt_content` 成功返回 SKILL.md 内容，未 fallback 到本地 helper
+- CSP 优先路由逻辑正常，不直接跳过订阅检查
+- 重新订阅后 `sync_resources` 恢复 prompt 注册成功
 
 **结论：** ✅ PASS
 
@@ -149,16 +147,15 @@
 ### Case 7：Telemetry 计数 — **PASS**
 
 **操作：**
-1. 重新订阅并 sync `zoom-code-review`
-2. 调用 `resolve_prompt_content` for `zoom-code-review`
-3. 检查返回中 `usage_tracked` 字段
+1. 调用 `resolve_prompt_content` for `zoom-code-review`（已在 Case 6 完成）
+2. 检查返回中 `usage_tracked` 字段
 
 **结果：**
 - `resolve_prompt_content` 成功返回内容
 - 响应包含 `usage_tracked: true`
 - Telemetry 正常上报
 
-**备注：** Case 6 中取消订阅后再重订阅，需先 `sync_resources` 重注册 prompt，否则报 `PROMPT_NOT_FOUND`。此行为符合预期（同步机制要求）。
+**备注：** 取消订阅后再重新订阅时，需先 `sync_resources` 重注册 prompt，否则报 `PROMPT_NOT_FOUND`。此行为符合预期（同步机制要求）。
 
 **结论：** ✅ PASS
 
@@ -183,7 +180,7 @@
   - `build-jfrog-path`: ✅ match
   - `team_config.py`: ✅ match
   - `branch_detector.py`: ✅ match
-- 内容完整性验证通过
+- 内容完整性验证通过（9 scripts + 7 teams 全部一致）
 
 **结论：** ✅ PASS
 
@@ -192,16 +189,16 @@
 ### Case 9：取消订阅 MCP 资源 → mcp.json 清理 — **PASS**
 
 **操作：**
-1. 验证 `acm` 存在于 `~/.cursor/mcp.json`
-2. `manage_subscription(action: "unsubscribe", resource_id: <acm id>)`
+1. 验证 `acm` 存在于 `~/.cursor/mcp.json`（由 Case 1 incremental sync 写入）
+2. `manage_subscription(action: "unsubscribe", resource_ids: ["8346836580e75837a7183285c5872843"])`（acm）
 3. 执行返回的 `remove_mcp_json_entry` local action，从 `mcp.json` 移除 `acm`
-4. 重新添加 `acm` 条目恢复（`merge_mcp_json`）
+4. 重新订阅并恢复 `acm` 条目
 
 **结果：**
-- `merge_mcp_json` 成功将 `acm` 写入 `mcp.json`
-- `remove_mcp_json_entry` 成功将 `acm` 从 `mcp.json` 删除
+- `merge_mcp_json` 成功将 `acm` 写入 `mcp.json`（初始 sync 阶段）
+- `remove_mcp_json_entry` 成功将 `acm` 从 `mcp.json` 删除（取消订阅后）
 - 验证 `mcp.json` 内容正确反映变更
-- 两方向操作均正常
+- 双向操作（添加/删除 MCP server 条目）均正常
 
 **结论：** ✅ PASS
 
@@ -211,12 +208,12 @@
 
 **操作：**
 1. `resolve_prompt_content` for `winzr-cpp-expert`
-2. 验证 SKILL.md 内容包含 `MANDATORY` tool call blocks（引用 `reference.md` 等子资源）
-3. 调用 `resolve_prompt_content(resource_id: <id>, resource_path: "reference.md")` 验证懒加载
+2. 验证 SKILL.md 内容包含 `## MANDATORY` tool call blocks（引用 `reference.md` 等子资源）
+3. 调用 `resolve_prompt_content(resource_id: "009157d8ed498e93c0dbdbdbd47ae40c", resource_path: "reference.md")` 验证懒加载
 
 **结果：**
-- 主 SKILL.md 成功返回，包含 `## MANDATORY` 引用块
-- 子资源 `reference.md` 通过 `resource_path` 参数成功解析返回
+- 主 SKILL.md 成功返回，内嵌 md 引用被替换为 `MANDATORY tool call` 块
+- 子资源 `reference.md` 通过 `resource_path` 参数成功解析返回内容
 - 懒加载链路端到端验证通过
 
 **结论：** ✅ PASS
@@ -227,7 +224,7 @@
 
 | # | Case | 严重程度 | 描述 | 状态 |
 |---|------|----------|------|------|
-| 1 | Case 3 | HIGH | `sync_resources` Git fallback 路径未为 scripts/ 下文件设置 `mode: 0755`，导致脚本权限为 644 | 代码已修复（0.2.24-dev.1），**待 server 部署** |
+| 1 | Case 3 | HIGH | `sync_resources` API download 路径使用 `includes('/scripts/')` 导致脚本文件无法被识别为可执行文件，mode 字段未设置 | ✅ 已修复（`0.2.25-dev.1`），本轮验证通过 |
 
 ---
 
@@ -236,15 +233,16 @@
 - 订阅状态：恢复至快照（14 个）✅
 - `~/.cursor/mcp.json`：`acm` 条目已恢复 ✅
 - `~/.csp-ai-agent/skills/zoom-build/`：已通过 incremental sync 恢复 ✅
+- `~/.csp-ai-agent/skills/android-latest-sdk-artifacts/`：测试后已清理 ✅
 - 所有 Case 操作均为幂等性测试，无数据残留风险
 
 ---
 
 ## 结论
 
-**本轮（第四轮）Cursor 客户端 Release Check 完成。**
+**本轮（第五轮）Cursor 客户端 Release Check 完成。**
 
-- 9/10 Case PASS，通过率 **90%**
-- 唯一 FAIL（Case 3）为服务端 **部署延迟**导致，代码修复已就绪（`@elliotding/ai-agent-mcp-dev@0.2.24-dev.1`）
-- **建议：** 待 dev server 部署 `0.2.24-dev.1` 后，单独重跑 Case 3 验证 script 权限是否恢复为 `755`
-- 其余 9 个 Case 功能运行正常，无回归风险
+- **10/10 Case PASS，通过率 100%** 🎉
+- Bug 1（Case 3 脚本权限问题）已通过 `@elliotding/ai-agent-mcp-dev@0.2.25-dev.1` 修复并验证通过
+- 全部功能（sync、单资源过滤、权限、搜索订阅、取消订阅、模糊路由、Telemetry、内容一致性、mcp.json 管理、md 懒加载）运行正常
+- **Cursor 客户端 Release Check 已达到发布生产的质量门禁标准**

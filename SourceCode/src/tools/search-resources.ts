@@ -11,6 +11,8 @@ import { MCPServerError } from '../types/errors';
 import type { SearchResourcesParams, SearchResourcesResult, ToolResult } from '../types/tools';
 import { SearchCoordinator } from '../search';
 import { promptManager } from '../prompts/index.js';
+import { config } from '../config/index.js';
+import type { AgentProfile } from '../client-adapters/index.js';
 
 // Search coordinator singleton
 const searchCoordinator = new SearchCoordinator();
@@ -134,17 +136,35 @@ export async function searchResources(params: unknown): Promise<ToolResult<Searc
     // comparison is case/whitespace insensitive.
     const normalizeResourceName = (name: string) => name.toLowerCase().replace(/\s+/g, '-');
 
+    // Resolve agent profile for is_installed check strategy.
+    const resolvedSearchProfile: AgentProfile =
+      (typedParams.agent_profile as AgentProfile | undefined) ?? config.agentProfile ?? 'cursor';
+
     // Check subscription and installation status for each result
     const finalResults = await Promise.all(
       enhancedResults.map(async (resource) => {
-        // Check if installed locally in the Cursor directory for this resource type
+        // Check if installed locally.
+        //
+        // Cursor: check the local filesystem path (server-side filesystem matches
+        //   the user's machine when running as a local stdio MCP).
+        //
+        // Codex: complex skills are stored in ~/.csp-ai-agent/codex/skills/ on the
+        //   USER's machine, which is inaccessible when the MCP server runs remotely.
+        //   Use prompt registry membership as a proxy: if the resource is subscribed
+        //   and its prompt is registered in-memory, treat it as installed.
+        //   This avoids a false-always-false signal that would confuse Codex agents.
         let isInstalled = false;
-        try {
-          const resourcePath = getCursorResourcePath(resource.type, resource.name);
-          isInstalled = await filesystemManager.fileExists(resourcePath);
-        } catch {
-          // Unknown type or path check failed — treat as not installed
-          isInstalled = false;
+        if (resolvedSearchProfile === 'codex') {
+          // For Codex: installed ≡ subscribed prompt is registered in memory.
+          isInstalled = localSubscribedNames.has(normalizeResourceName(resource.name));
+        } else {
+          try {
+            const resourcePath = getCursorResourcePath(resource.type, resource.name);
+            isInstalled = await filesystemManager.fileExists(resourcePath);
+          } catch {
+            // Unknown type or path check failed — treat as not installed
+            isInstalled = false;
+          }
         }
 
         // Override is_subscribed with the local promptManager state.
@@ -227,6 +247,14 @@ export const searchResourcesTool = {
       keyword: {
         type: 'string',
         description: 'Search keyword (searches in name, description, tags)',
+      },
+      agent_profile: {
+        type: 'string',
+        description:
+          'AI client profile: "cursor" (default) or "codex". ' +
+          'Affects is_installed detection strategy: Cursor checks local filesystem paths; ' +
+          'Codex uses prompt-registry membership (remote MCP cannot access user filesystem).',
+        enum: ['cursor', 'codex'],
       },
       user_token: {
         type: 'string',

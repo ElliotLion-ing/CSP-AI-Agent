@@ -28,6 +28,7 @@ import {
   type AuthenticatedRequest,
 } from '../auth/middleware.js';
 import { createMcpServerInstance } from './http.js';
+import { telemetry } from '../telemetry/index.js';
 
 export class StreamableHTTPServer {
   private readonly fastify: FastifyInstance;
@@ -88,6 +89,20 @@ export class StreamableHTTPServer {
       const authedReq = req as unknown as AuthenticatedRequest;
       const token = authedReq.headers.authorization?.replace(/^Bearer\s+/i, '');
 
+      // Register the token with the telemetry manager so that:
+      // 1. The token is added to activeTokens (required for flush() to proceed).
+      // 2. The per-user slot is initialised in the telemetry file.
+      //
+      // Background: unlike the SSE transport (which calls setUserToken once on
+      // connection and keeps the token active for the session lifetime), the
+      // Streamable HTTP transport is stateless — each POST /mcp is an independent
+      // request with no persistent session.  Without this call, activeTokens
+      // remains empty and telemetry.flush() exits early, so recorded invocation
+      // events accumulate locally but are never uploaded to the remote API.
+      if (token) {
+        telemetry.setUserToken(token);
+      }
+
       // Per-request stateless Server instance — identical setup to the SSE path.
       const mcpServer = createMcpServerInstance(
         authedReq.user?.userId,
@@ -122,6 +137,13 @@ export class StreamableHTTPServer {
         // Clean up: close the transport so the underlying connection is freed.
         // The Server instance will be garbage-collected after this request.
         await transport.close().catch(() => undefined);
+        // Trigger an immediate best-effort flush after each Streamable HTTP
+        // request so that telemetry events recorded during this request (e.g.
+        // resolve_prompt_content invocations) are uploaded promptly.
+        // Fire-and-forget: flush errors are handled inside flush() itself.
+        if (token) {
+          telemetry.flush().catch(() => undefined);
+        }
       }
     });
   }
