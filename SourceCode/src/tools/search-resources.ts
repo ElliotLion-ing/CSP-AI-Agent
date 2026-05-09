@@ -10,6 +10,7 @@ import { getCursorResourcePath } from '../utils/cursor-paths.js';
 import { MCPServerError } from '../types/errors';
 import type { SearchResourcesParams, SearchResourcesResult, ToolResult } from '../types/tools';
 import { SearchCoordinator } from '../search';
+import { promptManager } from '../prompts/index.js';
 
 // Search coordinator singleton
 const searchCoordinator = new SearchCoordinator();
@@ -115,6 +116,24 @@ export async function searchResources(params: unknown): Promise<ToolResult<Searc
       'Search enhancement applied'
     );
 
+    // Build a local subscription set from registered prompts for the current user.
+    // The server-side is_subscribed flag may be stale (token mismatch, cache, etc.)
+    // so we override it with the authoritative local promptManager state.
+    const userToken = typedParams.user_token ?? '';
+    const localSubscribedNames = new Set<string>(
+      promptManager.promptNames(userToken).map((promptName) => {
+        // Prompt names are "<type>/<resource_name>" where resource_name is already
+        // lowercased with spaces replaced by '-' (see buildPromptName).
+        // Extract just the resource_name portion for comparison against search results.
+        const slashIdx = promptName.indexOf('/');
+        return slashIdx >= 0 ? promptName.slice(slashIdx + 1) : promptName;
+      }),
+    );
+
+    // Normalize API resource names the same way buildPromptName does so the
+    // comparison is case/whitespace insensitive.
+    const normalizeResourceName = (name: string) => name.toLowerCase().replace(/\s+/g, '-');
+
     // Check subscription and installation status for each result
     const finalResults = await Promise.all(
       enhancedResults.map(async (resource) => {
@@ -128,8 +147,22 @@ export async function searchResources(params: unknown): Promise<ToolResult<Searc
           isInstalled = false;
         }
 
+        // Override is_subscribed with the local promptManager state.
+        // Local state is authoritative: if the prompt is registered in-memory,
+        // the resource is definitely subscribed regardless of the API response.
+        const locallySubscribed = localSubscribedNames.has(normalizeResourceName(resource.name));
+        const isSubscribed = locallySubscribed || Boolean(resource.is_subscribed);
+
+        if (locallySubscribed && !resource.is_subscribed) {
+          logger.debug(
+            { resourceName: resource.name, normalizedName: normalizeResourceName(resource.name), apiIsSubscribed: resource.is_subscribed },
+            'search_resources: overriding is_subscribed=false from API with local promptManager state (true)',
+          );
+        }
+
         return {
           ...resource,
+          is_subscribed: isSubscribed,
           is_installed: isInstalled,
         };
       })

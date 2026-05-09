@@ -16,10 +16,10 @@
 
 本 checklist 分两个测试分区执行：
 
-| 分区 | 客户端 | 执行环境 | MCP 连接方式 |
-|------|--------|---------|------------|
-| **Part A**（Case 1–10） | **Cursor** | Cursor IDE Agent | SSE via `~/.cursor/mcp.json` |
-| **Part B**（Case C1–C10 + Codex 专项） | **Codex** | Codex CLI Agent | SSE via `~/.codex/config.toml` |
+| 分区 | 客户端 | 执行环境 | MCP 连接方式 | Transport | Endpoint |
+|------|--------|---------|------------|-----------|---------|
+| **Part A**（Case 1–10） | **Cursor** | Cursor IDE Agent | SSE via `~/.cursor/mcp.json` | SSE | `/sse` |
+| **Part B**（Case C1–C10 + Codex 专项） | **Codex** | Codex CLI Agent | Streamable HTTP via `~/.codex/config.toml` | Streamable HTTP | `/mcp` |
 
 Part A 和 Part B 均须全部通过，方可发布生产环境。
 
@@ -498,7 +498,8 @@ Case C1–C10：与 Cursor Part A 相同的 10 个 Case（在 Codex 中重跑）
 ## Part B：Codex 客户端专项 Check
 
 > **执行方式：** 在 Codex CLI 会话中，由 Codex Agent 执行以下所有 Case。  
-> **前置条件：** `~/.codex/config.toml` 中已配置 `[mcp_servers.csp-ai-agent]`，Codex 已重启使配置生效。
+> **前置条件：** `~/.codex/config.toml` 中已配置 `[mcp_servers.csp-ai-agent]`，且 `url` 字段指向 `/mcp` 端点（Streamable HTTP），Codex 已重启使配置生效。  
+> **⚠️ 注意：** Codex 使用 **Streamable HTTP** transport（`/mcp` 端点），与 Cursor 使用的 **SSE**（`/sse` 端点）不同，两者 URL 尾缀不一致，配置时需注意区分。
 
 ---
 
@@ -514,7 +515,7 @@ Case C1–C10：与 Cursor Part A 相同的 10 个 Case（在 Codex 中重跑）
 
 ```bash
 # Step 1：读取 config.toml 中的 csp-ai-agent 配置节
-grep -A 5 "\[mcp_servers.csp-ai-agent\]" ~/.codex/config.toml
+grep -A 6 "\[mcp_servers.csp-ai-agent\]" ~/.codex/config.toml
 ```
 
 **结果对照表：**
@@ -522,7 +523,8 @@ grep -A 5 "\[mcp_servers.csp-ai-agent\]" ~/.codex/config.toml
 | 验证项 | 预期行为 | 实际结果 | 通过？ |
 |--------|----------|----------|--------|
 | 配置节存在 | `[mcp_servers.csp-ai-agent]` 节在 config.toml 中存在 | | |
-| url 字段正确 | `url = "https://zct-dev.zoomdev.us/csp-agent/sse"`（dev）或 prod endpoint | | |
+| url 字段使用 `/mcp` 端点 | `url = "https://zct-dev.zoomdev.us/csp-agent/mcp"`（dev）或 prod endpoint；**尾缀必须为 `/mcp`，不得为 `/sse`**（Codex 使用 Streamable HTTP，Cursor 才用 SSE）| | |
+| url 不含 `/sse` 尾缀 | URL 中不出现 `/sse`（如有则配置错误，需改为 `/mcp`）| | |
 | http_headers 包含 Authorization | `http_headers` 中含有 `Authorization = "Bearer ..."` | | |
 | MCP 连接成功 | 在 Codex 中调用任意工具（如 `manage_subscription`）返回正常结果，不报 connection error | | |
 
@@ -749,3 +751,7 @@ ls -la ~/.csp-ai-agent/skills/zoom-build/scripts/build-cli
 6. **Case C0-2 横跨重启边界**：Phase 1 完成注入后，AI 必须写入检查点文件 `~/.codex/release-check-checkpoint.md` 并提示用户重启 Codex。重启后用户输入「继续 Release Check，从 Case C0-2 Phase 2 开始」触发 Phase 2 验证。Phase 2 验证通过后 AI 删除检查点文件
 7. **Part B Case C7 必须验证 `agent_profile = "codex"`**：这是 CODEX-001 核心 telemetry 验证项
 8. **所有 Case 结果填写到 Report 文件中**：`Test/Release Check/Reports/release-check-report-YYYY-MM-DD.md`，Part A 和 Part B 分区记录
+9. **两种客户端使用不同 Transport 和 URL 端点（重要）**：
+   - **Cursor（Part A）**：SSE transport → URL 尾缀为 `/sse`，配置在 `~/.cursor/mcp.json`
+   - **Codex（Part B）**：Streamable HTTP transport → URL 尾缀为 `/mcp`，配置在 `~/.codex/config.toml`
+   - 两者 URL 路径不可互换，Codex 中若配置为 `/sse` 将导致连接失败

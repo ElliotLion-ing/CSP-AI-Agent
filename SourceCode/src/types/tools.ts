@@ -173,13 +173,29 @@ export interface MergeTomlAction {
   overwrite: boolean;
 }
 
+/**
+ * Remove an MCP server section from a TOML config file (Codex: `~/.codex/config.toml`).
+ *
+ * Instructs the AI Agent to read the TOML file, remove the table
+ * `[mcp_servers.<server_name>]` if it exists, and re-write the file.
+ * No-op when the section is absent.
+ */
+export interface RemoveTomlEntryAction {
+  action: 'remove_toml_entry';
+  /** Absolute path to the TOML file (may start with ~). */
+  toml_path: string;
+  /** Name of the MCP server to remove under `[mcp_servers.<server_name>]`. */
+  server_name: string;
+}
+
 export type LocalAction =
   | WriteFileAction
   | DeleteFileAction
   | MergeMcpJsonAction
   | RemoveMcpJsonEntryAction
   | CheckFileAction
-  | MergeTomlAction;
+  | MergeTomlAction
+  | RemoveTomlEntryAction;
 
 // Tool Handler Function Type (generic, accepts any params and returns any result)
 export type ToolHandler = (params: unknown) => Promise<ToolResult>;
@@ -350,6 +366,12 @@ export interface ManageSubscriptionParams {
   notify?: boolean;
   /** CSP API token from the user's mcp.json env configuration. */
   user_token?: string;
+  /**
+   * Identifies the AI client calling this tool.
+   * 'cursor' (default) → MCP config operations target ~/.cursor/mcp.json.
+   * 'codex'            → MCP config operations target ~/.codex/config.toml.
+   */
+  agent_profile?: 'cursor' | 'codex';
 }
 
 export interface ManageSubscriptionResult {
@@ -471,6 +493,12 @@ export interface UninstallResourceParams {
   resource_type?: 'command' | 'skill' | 'rule' | 'mcp';
   /** CSP API token from the user's mcp.json env configuration. */
   user_token?: string;
+  /**
+   * Identifies the AI client calling this tool.
+   * 'cursor' (default) → emits remove_mcp_json_entry targeting ~/.cursor/mcp.json.
+   * 'codex'            → emits remove_toml_entry targeting ~/.codex/config.toml.
+   */
+  agent_profile?: 'cursor' | 'codex';
 }
 
 export interface UninstallResourceResult {

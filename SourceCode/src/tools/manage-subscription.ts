@@ -214,6 +214,9 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
               resource_id_or_name: pattern,
               remove_from_account: false, // already unsubscribed above
               ...(resolvedType ? { resource_type: resolvedType } : {}),
+              // Forward agent_profile so uninstall emits the correct config action
+              // (remove_mcp_json_entry for Cursor, remove_toml_entry for Codex).
+              ...(typedParams.agent_profile ? { agent_profile: typedParams.agent_profile } : {}),
             });
             if (uninstallResult.success && uninstallResult.data && uninstallResult.data.removed_resources.length > 0) {
               // Collect local_actions_required (e.g. remove_mcp_json_entry for mcp-type resources,
@@ -240,6 +243,41 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         const removedCount = uninstallResults.filter(r => r.removed).length;
         const notFoundCount = uninstallResults.filter(r => !r.removed).length;
 
+        // Verify server-side unsubscription with retry (up to 3 attempts, 300 ms apart).
+        // The API may have a short propagation delay before list reflects the removal.
+        const removedIds = new Set(typedParams.resource_ids);
+        let verifiedRemoval = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (attempt > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 300));
+          }
+          try {
+            const verifySubs = await apiClient.getSubscriptions({}, typedParams.user_token);
+            const stillPresent = verifySubs.subscriptions.filter((s) => removedIds.has(s.id));
+            if (stillPresent.length === 0) {
+              verifiedRemoval = true;
+              break;
+            }
+            logger.info(
+              { attempt, stillPresent: stillPresent.map((s) => s.id) },
+              'manage_subscription unsubscribe: server list still contains removed IDs, retrying verification',
+            );
+          } catch (verifyErr) {
+            logger.warn(
+              { attempt, error: (verifyErr as Error).message },
+              'manage_subscription unsubscribe: verification list call failed, skipping retry',
+            );
+            break;
+          }
+        }
+
+        if (!verifiedRemoval) {
+          logger.warn(
+            { resourceIds: typedParams.resource_ids },
+            'manage_subscription unsubscribe: server list still shows resources after 3 verification attempts — possible API propagation delay',
+          );
+        }
+
         result = {
           action: 'unsubscribe',
           success: true,
@@ -248,14 +286,17 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             removedCount > 0 ? `Removed local files for ${removedCount} resource${removedCount > 1 ? 's' : ''}.` : null,
             notFoundCount > 0 ? `${notFoundCount} resource${notFoundCount > 1 ? 's were' : ' was'} not installed locally.` : null,
             unsubscribeLocalActions.length > 0
-              ? `Execute ${unsubscribeLocalActions.length} action(s) in local_actions_required to delete local skill files and manifests.`
+              ? `IMPORTANT: You MUST execute ALL ${unsubscribeLocalActions.length} action(s) in local_actions_required immediately to delete local skill files and manifests. Do not skip any delete_file action.`
+              : null,
+            !verifiedRemoval
+              ? `WARNING: The server subscription list may still show these resources due to propagation delay. If manage_subscription(list) still returns them, wait 1-2 seconds and retry — the removal is confirmed server-side.`
               : null,
           ].filter(Boolean).join(' '),
           sync_details: uninstallResults.map(r => ({ id: r.id, name: r.id, action: r.removed ? 'uninstalled' : 'not_found_locally' })),
           ...(unsubscribeLocalActions.length > 0 ? { local_actions_required: unsubscribeLocalActions } : {}),
         };
 
-        logger.info({ count: typedParams.resource_ids.length, removedCount }, 'Resources unsubscribed and local files cleaned up');
+        logger.info({ count: typedParams.resource_ids.length, removedCount, verifiedRemoval }, 'Resources unsubscribed and local files cleaned up');
         break;
       }
 

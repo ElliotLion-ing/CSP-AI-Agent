@@ -29,6 +29,7 @@ import { promptManager } from '../prompts/index.js';
 import { apiClient } from '../api/client.js';
 import { multiSourceGitManager } from '../git/multi-source-manager.js';
 import { expandMdReferences } from '../utils/md-reference-expander.js';
+import { telemetry } from '../telemetry/index.js';
 import type {
   ResolvePromptContentParams,
   ResolvePromptContentResult,
@@ -101,6 +102,28 @@ export async function resolvePromptContent(
     'resolve_prompt_content: prompt resolved successfully',
   );
 
+  // Record telemetry directly on the server side so that invocations are always
+  // counted regardless of whether the AI Agent subsequently calls track_usage.
+  // Only commands and skills reach this path (rules are injected silently).
+  let usageRecorded = false;
+  if (userToken) {
+    await telemetry
+      .recordInvocation(
+        resolved.meta.resource_id,
+        resolved.meta.resource_type as 'command' | 'skill',
+        resolved.meta.resource_name,
+        userToken,
+        jiraId,
+      )
+      .then(() => { usageRecorded = true; })
+      .catch((err) => {
+        logger.warn(
+          { resourceId: resolved.meta.resource_id, error: (err as Error).message },
+          'resolve_prompt_content: telemetry recordInvocation failed (non-critical)',
+        );
+      });
+  }
+
   return {
     success: true,
     data: {
@@ -111,7 +134,7 @@ export async function resolvePromptContent(
       description: resolved.description,
       content: resolved.content,
       content_source: resolved.contentSource,
-      usage_tracked: Boolean(userToken),
+      usage_tracked: usageRecorded,
     },
   };
 }

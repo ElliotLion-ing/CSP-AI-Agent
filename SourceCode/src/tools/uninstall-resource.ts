@@ -9,6 +9,7 @@
 import { logger, logToolCall } from '../utils/logger';
 import { apiClient } from '../api/client';
 import { getCursorTypeDirForClient, getCursorRootDirForClient, getCspAgentDirForClient } from '../utils/cursor-paths.js';
+import { getCodexConfigTomlPathForClient } from '../utils/codex-paths.js';
 import { MCPServerError, createValidationError } from '../types/errors';
 import type { UninstallResourceParams, UninstallResourceResult, LocalAction, ToolResult } from '../types/tools';
 import { promptManager } from '../prompts/index.js';
@@ -114,7 +115,10 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
     // The MCP server may be running remotely; we must NOT touch the server's
     // own filesystem.  Instead we return delete/remove instructions so the AI
     // Agent performs them on the user's LOCAL machine.
-    logger.debug({ pattern, resourceType: typedParams.resource_type }, 'Building local uninstall actions for Rule/MCP resource...');
+    logger.debug({ pattern, resourceType: typedParams.resource_type, agentProfile: typedParams.agent_profile }, 'Building local uninstall actions for Rule/MCP resource...');
+
+    // Resolve agent profile: defaults to 'cursor' for backward compatibility.
+    const agentProfile = typedParams.agent_profile ?? 'cursor';
 
     // Use client-side tilde-based paths; the MCP server may be running remotely
     // and its os.homedir() would resolve to the server's home, not the user's.
@@ -148,11 +152,33 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
 
     if (isMcp) {
       // MCP: delete install directory (Format A — may not exist for remote-URL MCPs)
-      // and remove the mcpServers entry from mcp.json.
+      // and remove the config entry from the appropriate client config file.
       const mcpDir = getCursorTypeDirForClient('mcp');
       const mcpInstallDir = `${mcpDir}/${pattern}`;
       localActions.push({ action: 'delete_file', path: mcpInstallDir, recursive: true });
-      localActions.push({ action: 'remove_mcp_json_entry', mcp_json_path: mcpJsonPath, server_name: pattern });
+
+      if (agentProfile === 'codex') {
+        // Codex uses config.toml; emit remove_toml_entry so the AI removes
+        // the [mcp_servers.<server_name>] section from ~/.codex/config.toml.
+        const tomlPath = getCodexConfigTomlPathForClient();
+        localActions.push({
+          action: 'remove_toml_entry',
+          toml_path: tomlPath,
+          server_name: pattern,
+        });
+        logger.info(
+          { pattern, tomlPath, agentProfile },
+          'uninstall_resource: Codex MCP — remove_toml_entry queued for config.toml',
+        );
+      } else {
+        // Cursor (default): remove from mcp.json
+        localActions.push({ action: 'remove_mcp_json_entry', mcp_json_path: mcpJsonPath, server_name: pattern });
+        logger.info(
+          { pattern, mcpJsonPath, agentProfile },
+          'uninstall_resource: Cursor MCP — remove_mcp_json_entry queued for mcp.json',
+        );
+      }
+
       removedResources.push({ id: pattern, name: pattern, path: mcpInstallDir });
     }
 

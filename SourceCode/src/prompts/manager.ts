@@ -548,7 +548,10 @@ export class PromptManager {
             `\`\`\`json\n${JSON.stringify(cachedActions, null, 2)}\n\`\`\`\n\n` +
             `Action execution rules:\n` +
             `- **\`write_file\`**: Create or overwrite the file at \`path\` with \`content\`. ` +
-            `Expand \`~\` to the user's home directory. Create parent directories if needed.\n` +
+            `Expand \`~\` to the user's home directory. Create parent directories if needed. ` +
+            `**CRITICAL: if the action contains a \`mode\` field (e.g. \`"0755"\`), you MUST set the file's Unix permissions ` +
+            `after writing using \`chmod(path, parseInt(mode, 8))\` (or \`fs.chmodSync\` in Node.js). ` +
+            `Failure to apply \`mode\` will leave scripts non-executable — this breaks skill execution.**\n` +
             `- **\`merge_mcp_json\`**: Read \`~/.cursor/mcp.json\` (create if missing), ` +
             `add or update \`mcpServers[server_name]\` with the \`entry\` object. Do not remove existing entries.\n` +
             `- **\`merge_toml\`**: Read the TOML file at \`toml_path\` (create if missing), ` +
@@ -558,6 +561,8 @@ export class PromptManager {
             `If \`recursive\` is true, delete the directory recursively. Skip if not found.\n` +
             `- **\`remove_mcp_json_entry\`**: Read \`~/.cursor/mcp.json\`, ` +
             `remove \`mcpServers[server_name]\` if it exists, then write the file back.\n` +
+            `- **\`remove_toml_entry\`**: Read the TOML file at \`toml_path\` (e.g. \`~/.codex/config.toml\`), ` +
+            `remove the table section \`[mcp_servers.<server_name>]\` if it exists, then write the file back. No-op when the section is absent.\n` +
             restartSection +
             `\n### Step 2 — Report\n`
           )
@@ -570,13 +575,18 @@ export class PromptManager {
             `If the \`sync_resources\` result contains a \`local_actions_required\` array, ` +
             `execute every action on the user's LOCAL machine:\n\n` +
             `- **\`write_file\`**: Create or overwrite file at \`path\` with \`content\`. ` +
-            `Expand \`~\` to the user's home directory. Create parent directories if needed.\n` +
+            `Expand \`~\` to the user's home directory. Create parent directories if needed. ` +
+            `**CRITICAL: if the action contains a \`mode\` field (e.g. \`"0755"\`), you MUST set the file's Unix permissions ` +
+            `after writing using \`chmod(path, parseInt(mode, 8))\` (or \`fs.chmodSync\` in Node.js). ` +
+            `Failure to apply \`mode\` will leave scripts non-executable — this breaks skill execution.**\n` +
             `- **\`merge_mcp_json\`**: Read \`~/.cursor/mcp.json\` (create if missing), ` +
             `add or update \`mcpServers[server_name]\` with the \`entry\` object. Do not remove existing entries.\n` +
             `- **\`delete_file\`**: Delete the file or directory at \`path\`. ` +
             `If \`recursive\` is true, delete the directory recursively. Skip if not found.\n` +
             `- **\`remove_mcp_json_entry\`**: Read \`~/.cursor/mcp.json\`, ` +
-            `remove \`mcpServers[server_name]\` if it exists, then write the file back.\n\n` +
+            `remove \`mcpServers[server_name]\` if it exists, then write the file back.\n` +
+            `- **\`remove_toml_entry\`**: Read the TOML file at \`toml_path\` (e.g. \`~/.codex/config.toml\`), ` +
+            `remove the table section \`[mcp_servers.<server_name>]\` if it exists, then write the file back. No-op when the section is absent.\n\n` +
             `### Step 3 — Report\n`
           );
 
