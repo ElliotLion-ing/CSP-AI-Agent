@@ -703,7 +703,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                         action: 'write_file',
                         path: `${skillDir}/${firstScript.relative_path}`,
                         ...encodeForRender(firstScript.relative_path, firstScript.content, firstScript.encoding),
-                        mode: firstScript.mode,
+                        mode: firstScript.mode ?? (firstScript.relative_path.includes('scripts/') ? '0755' : undefined),
                         is_skill_manifest: true,
                         skill_manifest_content: Buffer.from(rawContent, "utf8").toString("base64"),
                       });
@@ -717,7 +717,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                         action: 'write_file',
                         path: `${skillDir}/${scriptFile.relative_path}`,
                         ...encodeForRender(scriptFile.relative_path, scriptFile.content, scriptFile.encoding),
-                        mode: scriptFile.mode,
+                        mode: scriptFile.mode ?? (scriptFile.relative_path.includes('scripts/') ? '0755' : undefined),
                       });
                     }
                   }
