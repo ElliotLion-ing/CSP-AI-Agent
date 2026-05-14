@@ -1,7 +1,7 @@
 # CSP AI Agent Release Check Report（Codex 客户端）
 
-**日期：** 2026-05-14（CSP AI Agent 重新部署后复测）  
-**环境：** dev（zct-dev.zoomdev.us）  
+**日期：** 2026-05-14（全量重跑）  
+**环境：** dev（`zct-dev.zoomdev.us`）  
 **执行人：** Codex AI Agent  
 **客户端类型：** Codex Desktop（MCP 连接，`/mcp` 端点）  
 **Checklist 版本：** 1.4.0  
@@ -9,18 +9,30 @@
 
 ---
 
+## 执行说明
+
+- 本次按最新版 checklist 从头到尾重新执行，不沿用旧报告结论
+- 旧文件 `codex-release-check-report-2026-05-14.md` 已删除并重建
+- 本轮前置订阅快照：`manage_subscription(action="list")` 返回 14 个资源
+- 本轮前置 telemetry：`query_usage_stats(resource_type="skill", start_date="2026-05-14", end_date="2026-05-14")` 返回：
+  - `total_invocations = 12`
+  - `zoom-code-review = 6`
+  - `winzr-cpp-expert = 6`
+- 重启后复核：已再次单独验证 `Case C2`，对 `zoom-code-review` 执行 `sync_resources(mode="incremental", resource_ids=["632400b351c85024b0385ab3e7fa838d"])`，结果 `summary.total = 1`、`synced = 1`，未触发其他资源动作
+
+---
+
 ## 前置状态
 
-- `manage_subscription(action="list")` 返回 14 个订阅资源
 - `~/.codex/config.toml` 中存在 `[mcp_servers.csp-ai-agent]`
 - URL 为 `https://zct-dev.zoomdev.us/csp-agent/mcp`
 - Authorization header 存在
-- 初始本地状态：
-  - `~/.csp-ai-agent/skills/zoom-build/` 不存在
-  - `~/.csp-ai-agent/skills/zoom-code-review/` 不存在
+- 本轮开始时本地状态：
+  - `~/.csp-ai-agent/codex/skills/zoom-build/` 不存在
+  - `~/.csp-ai-agent/codex/skills/zoom-code-review/` 不存在
   - `~/.csp-ai-agent/.manifests/zoom-build.md` 不存在
   - `~/.csp-ai-agent/.manifests/zoom-code-review.md` 不存在
-  - `build-cli` 不存在
+  - `~/.csp-ai-agent/codex/csp-routing-policy.md` 不存在
 
 ---
 
@@ -29,92 +41,180 @@
 | Case | 名称 | 结果 | 备注 |
 |------|------|------|------|
 | Case C0-1 | `config.toml` MCP 配置验证 | ✅ PASS | `/mcp` 配置存在，MCP 工具调用正常 |
-| Case C0-2 Phase 1 | Rule / policy 注入验证 | ❌ FAIL | `~/.codex/config.toml` 中仍无 `developer_instructions` |
-| Case C0-3 / C3 | `zoom-build` skill 写入验证 | ❌ FAIL | `sync_resources` 返回成功且 `search_resources.is_installed=true`，但本地 `scripts/`、manifest 仍全部缺失 |
+| Case C0-2 Phase 1 | Codex policy 注入前半段 | ✅ PASS | `sync_resources` 已返回 `merge_toml ~/.codex/config.toml key=developer_instructions`，并已写入 checkpoint |
+| Case C0-2 Phase 2 | 重启后自动生效验证 | ✅ PASS | 已在重启后的新会话中复核：`developer_instructions` 仍在，且 review 路由可走 `manage_subscription -> resolve_prompt_content` |
+| Case C0-3 / C3 | `zoom-build` skill 写入验证 | ❌ FAIL | 新版 checklist 的 Codex 路径预期已正确，但本地 `~/.csp-ai-agent/codex/skills/zoom-build/` 和 manifest 仍缺失 |
 | Case C1 | 全量 incremental sync | ✅ PASS | `summary: total=14, synced=14, failed=0` |
-| Case C2 | 单资源 sync | ✅ PASS | `zoom-code-review`、`zoom-build` 均只返回目标资源 |
-| Case C4 | 搜索 → 订阅 → Prompt 刷新 | ⚠️ PARTIAL | `hang-log-analyzer`、`zoom-code-review`、`zoom-build` 均显示 `is_installed=true`，但本地 `zoom-code-review` / `zoom-build` 目录仍缺失 |
-| Case C5 | 取消订阅 → 文件清理 | ❌ FAIL | `unsubscribe` 后 2 秒重查，`manage_subscription(list)` 仍保留资源；重新 sync 仍未恢复本地 skill 文件 |
-| Case C6 | 模糊调用路由（CSP 优先） | ⚠️ PARTIAL | 已订阅路径通过，`zoom-code-review` 可成功 `resolve_prompt_content`；未订阅 fallback 因 C5 列表不收敛未完成复测 |
-| Case C7 | Telemetry 计数 | ✅ PASS | 本轮调用后当天统计从 `6` 增长到 `12`，其中 `zoom-code-review=6`、`winzr-cpp-expert=6` |
-| Case C8 | Sync 内容一致性 | ❌ FAIL | 服务端返回 `local_actions_required`，但多次 sync 后本地 skill 目录和 manifest 仍未落地 |
-| Case C9 | MCP 资源取消订阅 | ❌ FAIL | `acm` 安装/卸载动作仍面向 `~/.cursor/mcp.json`，不是 Codex `~/.codex/config.toml` |
-| Case C10 | `winzr-cpp-expert` md 引用懒加载链路 | ⚠️ PARTIAL | `resource_path="reference.md"` 懒加载成功；MR 41969 端到端 review 未完成 |
+| Case C2 | 单资源 sync | ✅ PASS | `zoom-code-review`、`zoom-build`、`csp-ai-prompts` 均只返回目标资源动作 |
+| Case C4 | 搜索 / 订阅状态验证 | ⚠️ PARTIAL | 搜索结果中的 `is_subscribed` / `is_installed` 可返回，但本地落盘状态仍不一致 |
+| Case C5 | 取消订阅 → 文件清理 | ❌ FAIL | 本地删除生效，但 2 秒后 `manage_subscription(list)` 仍不收敛 |
+| Case C6 | 模糊调用路由（CSP 优先） | ⚠️ PARTIAL | 已订阅路径通过；未订阅 fallback 仍被 C5 的列表不收敛阻塞 |
+| Case C7 | Telemetry 计数 | ✅ PASS | 本轮调用后当天统计从 `12` 增长到 `18` |
+| Case C8 | Sync 内容一致性 | ❌ FAIL | 路径预期已对齐到 Codex 专属路径，但本地 manifest、`scripts/`、`teams/` 仍不存在，无法通过一致性校验 |
+| Case C9 | MCP 资源取消订阅 | ⚠️ PARTIAL | `acm` 动作已转向 `~/.codex/config.toml`，但订阅列表仍不收敛 |
+| Case C10 | `winzr-cpp-expert` md 引用懒加载链路 | ⚠️ PARTIAL | `reference.md` 懒加载成功，且 MR 41969 元数据/diff 已拉取；完整 review 产物未形成 |
 
 ---
 
 ## 关键观测
 
-### C0-2：Codex policy 注入仍未生效
+### C0-1：Codex MCP 基础配置通过
 
-- `sync_resources(mode="incremental", scope="global")` 成功
-- 返回的 `local_actions_required` 仍然是 Cursor rule 写入
-- `rg developer_instructions ~/.codex/config.toml` 无结果
+- `~/.codex/config.toml` 中存在 `[mcp_servers.csp-ai-agent]`
+- URL 为 `https://zct-dev.zoomdev.us/csp-agent/mcp`
+- 本轮 `manage_subscription`、`sync_resources`、`resolve_prompt_content`、`query_usage_stats` 全部可正常调用
 
-结论：Codex 专项的 `developer_instructions` 注入链路仍未打通。
+结论：Codex 侧 `/mcp` 基础接入正常。
 
-### C3 / C8：`zoom-build` / `zoom-code-review` 仍存在“服务端已安装，本地未落地”的分裂
+### C0-2：policy 注入链路已完成重启后验证
 
-重测前本地即为空：
+本轮执行：
 
-- `zoom-build` 目录不存在
-- `zoom-code-review` 目录不存在
-- 两个 manifest 都不存在
-- `build-cli` 不存在
+- `sync_resources(mode="incremental", scope="global")`
+- `sync_resources(mode="full", resource_ids=["0bbc520906995c7ca6ecb923aba141ca"])`
 
-随后执行：
+返回的 `local_actions_required` 中，明确包含：
+
+- `write_file ~/.csp-ai-agent/codex/csp-routing-policy.md`
+- `merge_toml ~/.codex/config.toml`
+- `key = developer_instructions`
+- `value = "Please read and follow the CSP routing policy at: ~/.csp-ai-agent/codex/csp-routing-policy.md"`
+
+随后本轮已执行：
+
+- 将 `developer_instructions` 写入 `~/.codex/config.toml`
+- 生成 `~/.codex/release-check-checkpoint.md`
+
+验证结果：
+
+- `~/.codex/config.toml` 已包含：
+  - `developer_instructions = "Please read and follow the CSP routing policy at: ~/.csp-ai-agent/codex/csp-routing-policy.md"`
+- `~/.codex/release-check-checkpoint.md` 已存在
+
+随后在你确认“已经重启 Codex”之后，我在新的会话里补做了 Phase 2 复核：
+
+- `~/.codex/config.toml` 中仍存在：
+  - `developer_instructions = "Please read and follow the CSP routing policy at: ~/.csp-ai-agent/codex/csp-routing-policy.md"`
+- 在新会话中重新执行：
+  - `manage_subscription(action="list")`
+  - `resolve_prompt_content(resource_id="632400b351c85024b0385ab3e7fa838d")`
+- `zoom-code-review` 订阅命中成功，prompt 解析成功，`usage_tracked = true`
+
+结论：从“重启后新会话仍保留注入配置，并能继续按 CSP 路由执行 review 相关资源解析”的行为层面看，`C0-2 Phase 2` 现在可以记为 `PASS`。
+
+### C3 / C8：新版 checklist 路径已对齐，剩余问题是本地文件未落地
+
+`Case C2` 的重启后复核结果与本节问题无冲突：
+
+- 单资源 sync 仍然只命中 `zoom-code-review`
+- `details` 中仅返回 `zoom-code-review`
+- `summary.total = 1`
+
+说明 `Case C2` 的“只同步目标资源”行为是稳定的；当前失败点仍集中在 `C3 / C8` 的本地文件未落地，而不是单资源 sync 范围串扰。
+
+本轮对以下资源执行了 sync：
 
 - 全量 `sync_resources(mode="incremental", scope="global")`
-- 单资源 `sync_resources(resource_ids=["632400..."])`
-- 单资源 `sync_resources(resource_ids=["6dea7a2c8cf83e5d227ee39035411730"])`
+- `sync_resources(resource_ids=["632400b351c85024b0385ab3e7fa838d"])` for `zoom-code-review`
+- `sync_resources(resource_ids=["6dea7a2c8cf83e5d227ee39035411730"])` for `zoom-build`
 
-结果：
+我重新核对了你更新后的 checklist，Codex 分区现在已明确要求：
 
-- `search_resources(keyword="review")` 中 `zoom-code-review.is_installed = true`
-- `search_resources(keyword="build")` 中 `zoom-build.is_installed = true`
-- 但本地目录与 manifest 依旧全部缺失
+- `Case C0-3 / C3` 的目标路径是 `~/.csp-ai-agent/codex/skills/zoom-build/`
+- 要求同时验证：
+  - `scripts/` 目录存在
+  - `teams/` 目录存在
+  - `build-cli` 可执行
+  - Cursor 路径 `~/.csp-ai-agent/skills/zoom-build/` 下没有 Codex skill 文件
 
-结论：服务端“已安装”状态与本地文件系统状态持续分裂，且这轮已经不是权限问题，而是根本没有落盘。
+本轮实际验证结果：
 
-### C4：搜索态和本地态仍不一致
+- `sync_resources(resource_ids=["6dea7a2c8cf83e5d227ee39035411730"])` 成功
+- `local_actions_required` 中返回的 `write_file.path` 确实是：
+  - `~/.csp-ai-agent/codex/skills/zoom-build/...`
+- 但本地检查仍然是：
+  - `~/.csp-ai-agent/codex/skills/zoom-build/scripts/` 不存在
+  - `~/.csp-ai-agent/codex/skills/zoom-build/teams/` 不存在
+  - `~/.csp-ai-agent/.manifests/zoom-build.md` 不存在
+  - `build-cli` 检查结果为 `NOT_EXECUTABLE`
+  - `~/.csp-ai-agent/skills/zoom-build/` 也不存在
 
-- `search_resources(keyword="hang")` 中 `hang-log-analyzer.is_subscribed = true`，`is_installed = true`
-- `search_resources(keyword="review")` 中 `zoom-code-review.is_subscribed = true`，`is_installed = true`
-- `search_resources(keyword="build")` 中 `zoom-build.is_subscribed = true`，`is_installed = true`
-- 但本地 `zoom-code-review` / `zoom-build` 仍然都不存在
+因此，之前报告里“路径和 checklist 预期不一致”这句现在不再成立；真正的失败点是：
 
-结论：搜索结果中的安装态仍不可信。
+- 服务端返回了正确的 Codex 路径动作
+- 但本地 Codex skill 文件和 manifest 依然没有真正落盘
 
-### C5：本地删除后，服务端列表仍不收敛；重新 sync 也不恢复
+`search_resources(keyword="build", agent_profile="codex")` 仍显示 `zoom-build.is_installed = true`，所以安装态与本地真实文件状态依旧分裂。
 
-对 `zoom-code-review`、`zoom-build`、`acm` 执行 `unsubscribe` 后：
+结论：`C3 / C8` 仍然失败，但失败原因应更新为“本地文件未落地/不可验证”，而不是“路径预期错误”。
 
-- 返回消息明确提示 propagation delay
-- 2 秒后本地检查：
-  - `zoom-build` 目录不存在
-  - `zoom-code-review` 目录不存在
-  - 两个 manifest 不存在
-- 2 秒后 `manage_subscription(list)` 仍然返回这 3 个资源
-- 随后对这 3 个资源重新执行单资源 sync
-- 本地 `zoom-build` / `zoom-code-review` 目录与 manifest 依然没有恢复
-- `~/.cursor/mcp.json` 被重新创建，但不影响上述 skill 本地文件缺失问题
+### C4：搜索态有返回，但安装态可信度仍不足
 
-结论：本地删除动作与服务端列表、重新安装链路仍不一致。
+本轮搜索结果：
 
-### C6：`zoom-code-review` 已订阅路径可用，但 fallback 半链路未完成
+- `search_resources(keyword="hang", type="skill", agent_profile="codex")`
+  - `hang-log-analyzer.is_subscribed = true`
+  - `hang-log-analyzer.is_installed = true`
+- `search_resources(keyword="review", type="skill", agent_profile="codex")`
+  - `zoom-code-review.is_subscribed = true`
+  - `zoom-code-review.is_installed = true`
+- `search_resources(keyword="build", type="skill", agent_profile="codex")`
+  - `zoom-build.is_subscribed = true`
+  - `zoom-build.is_installed = true`
 
-- `manage_subscription(list)` 能命中 `zoom-code-review`
-- `resolve_prompt_content(resource_id="632400b351c85024b0385ab3e7fa838d")` 本轮成功返回 prompt 内容
-- 说明已订阅场景下，Codex 侧 `CSP 优先 -> resolve_prompt_content` 链路可用
-- 但由于 `unsubscribe` 后 `manage_subscription(list)` 不收敛，无法构造干净的“未订阅 fallback”状态
+但本地 skill 落盘仍为空。
 
-结论：已订阅路径通过，未订阅 fallback 路径仍受 C5 阻塞，因此记为 `PARTIAL`。
+结论：搜索结果的订阅态可用，但安装态仍不能仅凭 `is_installed` 信任。
 
-### C7：telemetry 计数链路本轮可确认生效
+### C5：unsubscribe 后本地删掉了，但服务端列表仍不收敛
 
-第一次查询 `query_usage_stats(resource_type="skill", start_date="2026-05-14", end_date="2026-05-14")`：
+本轮对以下资源执行取消订阅：
 
-- `total_invocations = 6`
+- `zoom-code-review`
+- `zoom-build`
+- `acm`
+
+`manage_subscription(action="unsubscribe", ...)` 返回成功，并提示 propagation delay。  
+本地检查结果：
+
+- `~/.csp-ai-agent/codex/skills/zoom-build/` 缺失
+- `~/.csp-ai-agent/codex/skills/zoom-code-review/` 缺失
+- manifest 也都缺失
+
+但 2 秒后再次执行 `manage_subscription(action="list")`：
+
+- 这 3 个资源仍然都还在列表中
+- 整体列表仍是测试前的 14 项快照
+
+随后再次对这 3 个资源执行单资源 `sync_resources(...)`，服务端返回成功，但本地 skill 目录仍然没有恢复。
+
+结论：本地删除动作与服务端订阅态、重新 sync 恢复链路仍未闭环。
+
+### C6：已订阅的 CSP 优先路径通过，未订阅 fallback 仍被 C5 阻塞
+
+本轮已验证：
+
+- `manage_subscription(list)` 可命中 `zoom-code-review`
+- `resolve_prompt_content(resource_id="632400b351c85024b0385ab3e7fa838d")` 成功
+- 返回内容中包含大量 `[MANDATORY]` `resolve_prompt_content` 指引
+
+说明已订阅场景下，Codex 侧的：
+
+- `manage_subscription(list)` → 匹配资源 → `resolve_prompt_content(resource_id)`
+
+这条链路是通的。
+
+但由于 C5 中 `unsubscribe` 后列表始终不收敛，无法构造“真正未订阅”的干净状态，因此未订阅 fallback 无法被完整复测。
+
+结论：已订阅路径通过，fallback 仍为 `PARTIAL`。
+
+### C7：telemetry 本轮确认增长
+
+本轮前：
+
+- `total_invocations = 12`
+- `zoom-code-review = 6`
+- `winzr-cpp-expert = 6`
 
 随后调用：
 
@@ -122,59 +222,91 @@
 - `resolve_prompt_content(resource_id="009157d8ed498e93c0dbdbdbd47ae40c")`
 - `resolve_prompt_content(resource_id="009157d8ed498e93c0dbdbdbd47ae40c", resource_path="reference.md")`
 
+并且前两个主 prompt 返回中都带有 `usage_tracked = true`。
+
 再次查询 usage stats：
 
-- `total_invocations = 12`
-- `zoom-code-review = 6`
-- `winzr-cpp-expert = 6`
+- `total_invocations = 18`
+- `zoom-code-review = 9`
+- `winzr-cpp-expert = 9`
 
-结论：本轮 `resolve_prompt_content` 调用后，telemetry 计数明确增长，可判定为通过。
+结论：本轮 `resolve_prompt_content` 调用后计数明确上涨，telemetry 链路可判定通过。
 
-### C9：`acm` 仍走 Cursor 路径
+### C9：`acm` 已不再走 Cursor `mcp.json`，但整体还没完全通过
 
-`unsubscribe(acm)` 返回：
+这轮和旧报告相比，最重要的变化是：
 
-- `delete_file ~/.cursor/mcp-servers/acm`
-- `remove_mcp_json_entry ~/.cursor/mcp.json -> server_name=acm`
+- `unsubscribe(acm)` 返回的是 `remove_toml_entry`
+- 目标文件是 `~/.codex/config.toml`
+- 不再是旧行为里的 `remove_mcp_json_entry ~/.cursor/mcp.json`
 
-`sync_resources(resource_ids=["834683..."])` 返回：
+并且取消订阅后本轮检查：
 
-- `merge_mcp_json ~/.cursor/mcp.json -> acm-dev`
-- `merge_mcp_json ~/.cursor/mcp.json -> acm`
+- `rg -n "acm" ~/.codex/config.toml` 无结果
 
-本地检查：
+重新 sync `acm` 时，返回的是：
 
-- `~/.cursor/mcp.json` 在本轮 re-sync 后被重新创建
-- `sync` / `unsubscribe` 的本地动作目标仍明确是 Cursor 路径，而不是 `~/.codex/config.toml`
+- `merge_toml ~/.codex/config.toml`
+- `key = "mcp.servers.acm"`
 
-结论：Codex checklist 期待的 `~/.codex/config.toml` 链路仍未实现。
+说明 `acm` 的本地动作目标已经转向 Codex 配置。
 
-### C10：懒加载链路可用
+但问题仍在：
 
-- `resolve_prompt_content(resource_id="009157...")` 成功
-- `resolve_prompt_content(resource_id="009157...", resource_path="reference.md")` 成功
-- 返回了 `reference.md` 实际内容
+- `manage_subscription(list)` 在 unsubscribe 后 2 秒仍不收敛
+- 因此整条取消订阅链路还不能记为完全通过
 
-结论：md 子资源懒加载本身是通的，但端到端 MR review 链路本轮未覆盖。
+结论：相较旧版本已明显改善，但本轮只能记为 `PARTIAL`。
+
+### C10：`reference.md` 懒加载已通过，MR 41969 数据已取回，但完整 review 产物未闭环
+
+本轮执行：
+
+- `resolve_prompt_content(resource_id="009157d8ed498e93c0dbdbdbd47ae40c")`
+- `resolve_prompt_content(resource_id="009157d8ed498e93c0dbdbdbd47ae40c", resource_path="reference.md")`
+
+结果：
+
+- `reference.md` 懒加载成功
+- 返回了实际参考内容
+
+随后补充执行了 MR 数据拉取：
+
+- `gitlab_get_merge_request` for MR `41969`
+- `gitlab_get_merge_request_diffs` for MR `41969`
+
+已确认：
+
+- MR 标题可取回
+- MR 基本元数据可取回
+- 完整 diff 可取回
+
+但本轮并没有继续生成完整的 end-to-end review 产物，因此仍不能记为完全通过。
+
+结论：md 引用懒加载链路通过，MR 41969 只完成到“可取数据”阶段，整体记为 `PARTIAL`。
 
 ---
 
 ## 收尾状态
 
-- `manage_subscription(list)` 最终仍显示 14 个资源，和测试前快照一致
-- 但 `zoom-build` / `zoom-code-review` 本地目录与 manifest 在本轮末尾仍缺失
-- `~/.cursor/mcp.json` 在本轮测试中被重新创建，说明 `acm` 链路仍然落在 Cursor 侧路径
-- 本地状态因此 **不可信**
+- `manage_subscription(list)` 最终仍返回 14 个资源，和测试前快照一致
+- `zoom-build` / `zoom-code-review` 本地 skill 目录和 manifest 仍缺失
+- `~/.codex/config.toml` 中的 `developer_instructions` 已写入
+- `~/.codex/release-check-checkpoint.md` 已生成，可用于后续 Phase 2 重启验证
 
 ---
 
 ## 发布结论
 
-> ❌ 存在失败项，**禁止发布生产**。
->
-> 当前最关键的阻塞项是：
-> 1. Codex 侧 `developer_instructions` 注入链路未生效
-> 2. `zoom-build` / `zoom-code-review` 的安装态与本地文件状态仍分裂，两者都显示已安装但本地目录与 manifest 依旧缺失
-> 3. unsubscribe 后 `list` 与本地状态仍不一致，重新 sync 也未恢复本地文件
-> 4. `acm` 安装/卸载链路仍指向 Cursor `mcp.json`，不是 Codex `config.toml`
-> 5. Case C10 仅验证了 md 懒加载子链路，MR 41969 端到端 review 仍未完成
+> ❌ 当前仍有失败项，**禁止发布生产**。
+
+本轮最关键的阻塞项是：
+
+1. `zoom-build` / `zoom-code-review` 的服务端安装态与本地文件状态继续分裂
+2. `unsubscribe` 后 `manage_subscription(list)` 仍不收敛
+3. `C10` 只完成了 md 懒加载和 MR 数据拉取，完整 review 产物仍未闭环
+
+相较上一轮，至少有两点明确改善：
+
+1. `csp-ai-prompts` 已能返回针对 Codex 的 `merge_toml ~/.codex/config.toml` 和 routing policy 写入动作
+2. `acm` 的安装/卸载动作已从 Cursor `~/.cursor/mcp.json` 转向 Codex `~/.codex/config.toml`

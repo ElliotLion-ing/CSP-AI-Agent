@@ -387,7 +387,10 @@ class APIClient {
    *
    * @param userToken Per-request token from the caller's mcp.json configuration.
    */
-  async unsubscribe(resourceIds: string | string[], userToken?: string): Promise<void> {
+  async unsubscribe(
+    resourceIds: string | string[],
+    userToken?: string,
+  ): Promise<{ removed_count: number; requested_count: number }> {
     const ids = Array.isArray(resourceIds) ? resourceIds : [resourceIds];
     const response = await this.delete<{
       code: number;
@@ -398,6 +401,11 @@ class APIClient {
     if (!response.data) {
       throw new Error('Invalid API response: missing data field');
     }
+
+    return {
+      removed_count: response.data.removed_count,
+      requested_count: ids.length,
+    };
   }
 
   /**

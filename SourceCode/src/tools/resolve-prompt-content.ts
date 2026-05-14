@@ -31,6 +31,7 @@ import { multiSourceGitManager } from '../git/multi-source-manager.js';
 import { expandMdReferences } from '../utils/md-reference-expander.js';
 import { telemetry } from '../telemetry/index.js';
 import type {
+  LocalAction,
   ResolvePromptContentParams,
   ResolvePromptContentResult,
   ToolResult,
@@ -124,6 +125,16 @@ export async function resolvePromptContent(
       });
   }
 
+  // Codex may resolve the real prompt body without ever fetching the synthetic
+  // csp-ai-agent-setup prompt. To keep the legacy Cursor setup flow intact
+  // while unblocking Codex, also surface any resource-specific pending local
+  // actions here. The cache is consumed on delivery, matching setup-prompt
+  // semantics: once the agent receives the actions, execution responsibility
+  // moves to the client.
+  const resourceLocalActions: LocalAction[] | undefined = userToken
+    ? promptManager.consumeSyncActionsForResource(userToken, resolved.meta.resource_name)
+    : undefined;
+
   return {
     success: true,
     data: {
@@ -135,6 +146,9 @@ export async function resolvePromptContent(
       content: resolved.content,
       content_source: resolved.contentSource,
       usage_tracked: usageRecorded,
+      ...(resourceLocalActions && resourceLocalActions.length > 0
+        ? { local_actions_required: resourceLocalActions }
+        : {}),
     },
   };
 }

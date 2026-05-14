@@ -246,6 +246,89 @@ export class PromptManager {
     return actions;
   }
 
+  /**
+   * Read cached sync actions without consuming them.
+   * Used by status/reporting tools that need to know whether local setup work
+   * is still pending for a user.
+   */
+  peekSyncActions(userToken: string): LocalAction[] | undefined {
+    return this.userSyncActions.get(userToken);
+  }
+
+  /**
+   * Whether the user still has unconsumed local setup actions pending.
+   */
+  hasPendingSyncActions(userToken: string): boolean {
+    const actions = this.userSyncActions.get(userToken);
+    return Array.isArray(actions) && actions.length > 0;
+  }
+
+  /**
+   * Best-effort resource-level pending-setup detection.
+   *
+   * We cannot observe the user's local filesystem from a remote MCP server, so
+   * for Codex we treat an unconsumed local action that references the resource
+   * as evidence that installation is not complete yet.
+   */
+  hasPendingSyncActionsForResource(userToken: string, resourceName: string): boolean {
+    const actions = this.userSyncActions.get(userToken);
+    if (!actions || actions.length === 0) return false;
+
+    const normalizedName = resourceName.toLowerCase().replace(/\s+/g, '-');
+    return actions.some((action) => this.actionReferencesResource(action, normalizedName));
+  }
+
+  /**
+   * Consume only the pending local actions that reference a specific resource.
+   * Unrelated pending actions remain cached for the setup prompt or later calls.
+   */
+  consumeSyncActionsForResource(userToken: string, resourceName: string): LocalAction[] | undefined {
+    const actions = this.userSyncActions.get(userToken);
+    if (!actions || actions.length === 0) return undefined;
+
+    const normalizedName = resourceName.toLowerCase().replace(/\s+/g, '-');
+    const matched = actions.filter((action) => this.actionReferencesResource(action, normalizedName));
+    if (matched.length === 0) return undefined;
+
+    const remaining = actions.filter((action) => !this.actionReferencesResource(action, normalizedName));
+    if (remaining.length > 0) {
+      this.userSyncActions.set(userToken, remaining);
+    } else {
+      this.userSyncActions.delete(userToken);
+    }
+
+    logger.info(
+      {
+        userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
+        resourceName: normalizedName,
+        consumedActionCount: matched.length,
+        remainingActionCount: remaining.length,
+      },
+      'PromptManager: served resource-scoped local_actions_required from pending setup cache',
+    );
+    return matched;
+  }
+
+  private actionReferencesResource(action: LocalAction, normalizedName: string): boolean {
+    const pathNeedles = [`/${normalizedName}/`, `/${normalizedName}.`, `\\${normalizedName}\\`, `\\${normalizedName}.`];
+    switch (action.action) {
+      case 'write_file':
+      case 'delete_file':
+      case 'check_file': {
+        const actionPath = action.path.toLowerCase();
+        return pathNeedles.some((needle) => actionPath.includes(needle));
+      }
+      case 'merge_mcp_json':
+      case 'remove_mcp_json_entry':
+      case 'remove_toml_entry':
+        return action.server_name.toLowerCase() === normalizedName;
+      case 'merge_toml':
+        return action.key.toLowerCase().includes(normalizedName) || action.value.toLowerCase().includes(normalizedName);
+      default:
+        return false;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Prompt name helpers
   // ---------------------------------------------------------------------------

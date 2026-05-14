@@ -53,6 +53,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         let syncSummary: string | undefined;
         let syncDetails: Array<{ id: string; name: string; action: string }> | undefined;
         let pendingSetup: unknown[] | undefined;
+        let subscribeLocalActions: import('../types/tools.js').LocalAction[] | undefined;
 
         if (shouldAutoSync && subResult.subscriptions.length > 0) {
           logger.info({ resourceIds: typedParams.resource_ids }, 'Auto-syncing newly subscribed resources...');
@@ -64,6 +65,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             scope: typedParams.scope || 'global',
             user_token: typedParams.user_token,
             resource_ids: typedParams.resource_ids,
+            agent_profile: typedParams.agent_profile,
           });
           if (syncResult.success && syncResult.data) {
             const sd = syncResult.data;
@@ -71,6 +73,9 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             syncDetails = sd.details.map(d => ({ id: d.id, name: d.name, action: d.action }));
             if (sd.pending_setup && sd.pending_setup.length > 0) {
               pendingSetup = sd.pending_setup;
+            }
+            if (sd.local_actions_required && sd.local_actions_required.length > 0) {
+              subscribeLocalActions = sd.local_actions_required;
             }
             logger.info({ summary: sd.summary }, 'Auto-sync after subscribe completed');
           } else {
@@ -99,10 +104,14 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             `Successfully subscribed to ${subResult.subscriptions.length} resource${subResult.subscriptions.length > 1 ? 's' : ''}.`,
             syncSummary,
             syncHint,
+            subscribeLocalActions && subscribeLocalActions.length > 0
+              ? `IMPORTANT: ${subscribeLocalActions.length} local action(s) are still pending. Execute local_actions_required or fetch csp-ai-agent-setup before treating the resource as installed.`
+              : null,
             'If you need to execute a newly subscribed Command or Skill in this same conversation, call resolve_prompt_content next to retrieve the real prompt body.',
           ].filter(Boolean).join(' '),
           ...(syncDetails ? { sync_details: syncDetails } : {}),
           ...(pendingSetup ? { pending_setup: pendingSetup } : {}),
+          ...(subscribeLocalActions ? { local_actions_required: subscribeLocalActions } : {}),
         };
         break;
       }
@@ -146,8 +155,16 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         }
 
         // Cancel server-side subscription
-        await apiClient.unsubscribe(typedParams.resource_ids, typedParams.user_token);
-        logger.info({ count: typedParams.resource_ids.length }, 'Server-side subscriptions removed');
+        const unsubscribeResponse = await apiClient.unsubscribe(typedParams.resource_ids, typedParams.user_token);
+        if (unsubscribeResponse.removed_count !== typedParams.resource_ids.length) {
+          throw new Error(
+            `Unsubscribe API reported partial removal: requested=${unsubscribeResponse.requested_count}, removed=${unsubscribeResponse.removed_count}`,
+          );
+        }
+        logger.info(
+          { requested: unsubscribeResponse.requested_count, removed: unsubscribeResponse.removed_count },
+          'Server-side subscriptions removed',
+        );
 
         // Uninstall local files and MCP config for each resource.
         // For Command/Skill: unregister MCP Prompt instead of deleting local files.
@@ -362,6 +379,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         let batchSyncSummary: string | undefined;
         let batchSyncDetails: Array<{ id: string; name: string; action: string }> | undefined;
         let batchPendingSetup: unknown[] | undefined;
+        let batchLocalActions: import('../types/tools.js').LocalAction[] | undefined;
 
         if (shouldBatchAutoSync && batchSubResult.subscriptions.length > 0) {
           logger.info({ count: batchSubResult.subscriptions.length }, 'Auto-syncing batch subscribed resources...');
@@ -369,6 +387,8 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             mode: 'incremental',
             scope: typedParams.scope || 'global',
             user_token: typedParams.user_token,
+            resource_ids: typedParams.resource_ids,
+            agent_profile: typedParams.agent_profile,
           });
           if (batchSyncResult.success && batchSyncResult.data) {
             const sd = batchSyncResult.data;
@@ -376,6 +396,9 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             batchSyncDetails = sd.details.map(d => ({ id: d.id, name: d.name, action: d.action }));
             if (sd.pending_setup && sd.pending_setup.length > 0) {
               batchPendingSetup = sd.pending_setup;
+            }
+            if (sd.local_actions_required && sd.local_actions_required.length > 0) {
+              batchLocalActions = sd.local_actions_required;
             }
           } else {
             batchSyncSummary = 'Auto-sync failed — run sync_resources manually if needed';
@@ -394,9 +417,13 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           message: [
             `Successfully batch subscribed to ${batchSubResult.subscriptions.length} resource${batchSubResult.subscriptions.length > 1 ? 's' : ''}.`,
             batchSyncSummary,
+            batchLocalActions && batchLocalActions.length > 0
+              ? `IMPORTANT: ${batchLocalActions.length} local action(s) are still pending. Execute local_actions_required or fetch csp-ai-agent-setup before treating these resources as installed.`
+              : null,
           ].filter(Boolean).join(' '),
           ...(batchSyncDetails ? { sync_details: batchSyncDetails } : {}),
           ...(batchPendingSetup ? { pending_setup: batchPendingSetup } : {}),
+          ...(batchLocalActions ? { local_actions_required: batchLocalActions } : {}),
         };
         break;
       }

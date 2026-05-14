@@ -406,7 +406,9 @@ export interface SearchResourcesParams {
    * Identifies the AI client calling this tool.
    * Used to determine the correct is_installed check path.
    * 'cursor' (default) → checks ~/.cursor/skills/ etc.
-   * 'codex'            → is_installed derived from prompt registry (no local path check).
+   * 'codex'            → command install state comes from prompt registration;
+   *                      skill/rule/mcp install state stays false while
+   *                      pending local setup actions still exist.
    */
   agent_profile?: 'cursor' | 'codex';
 }
@@ -453,6 +455,8 @@ export interface ResolvePromptContentResult {
   content: string;
   content_source: 'cache' | 'generated' | 'raw_fallback' | 'api';
   usage_tracked: boolean;
+  /** Optional local actions that must be executed before the prompt is fully usable. */
+  local_actions_required?: LocalAction[];
 }
 
 // upload_resource

@@ -143,20 +143,28 @@ export async function searchResources(params: unknown): Promise<ToolResult<Searc
     // Check subscription and installation status for each result
     const finalResults = await Promise.all(
       enhancedResults.map(async (resource) => {
+        const normalizedName = normalizeResourceName(resource.name);
+        const locallySubscribed = localSubscribedNames.has(normalizedName);
+        const isSubscribed = locallySubscribed || Boolean(resource.is_subscribed);
+
         // Check if installed locally.
         //
         // Cursor: check the local filesystem path (server-side filesystem matches
         //   the user's machine when running as a local stdio MCP).
         //
-        // Codex: complex skills are stored in ~/.csp-ai-agent/codex/skills/ on the
-        //   USER's machine, which is inaccessible when the MCP server runs remotely.
-        //   Use prompt registry membership as a proxy: if the resource is subscribed
-        //   and its prompt is registered in-memory, treat it as installed.
-        //   This avoids a false-always-false signal that would confuse Codex agents.
+        // Codex: commands are prompt-only, but skills/rules/MCP installs may
+        //   still have pending local_actions_required that were cached for the
+        //   setup prompt and not yet consumed. Treat those resources as NOT
+        //   installed until pending setup is cleared; otherwise use the best
+        //   available subscription/prompt signal.
         let isInstalled = false;
         if (resolvedSearchProfile === 'codex') {
-          // For Codex: installed ≡ subscribed prompt is registered in memory.
-          isInstalled = localSubscribedNames.has(normalizeResourceName(resource.name));
+          const hasPendingSetup = promptManager.hasPendingSyncActionsForResource(userToken, resource.name);
+          if (resource.type === 'command') {
+            isInstalled = isSubscribed;
+          } else {
+            isInstalled = isSubscribed && !hasPendingSetup;
+          }
         } else {
           try {
             const resourcePath = getCursorResourcePath(resource.type, resource.name);
@@ -170,12 +178,9 @@ export async function searchResources(params: unknown): Promise<ToolResult<Searc
         // Override is_subscribed with the local promptManager state.
         // Local state is authoritative: if the prompt is registered in-memory,
         // the resource is definitely subscribed regardless of the API response.
-        const locallySubscribed = localSubscribedNames.has(normalizeResourceName(resource.name));
-        const isSubscribed = locallySubscribed || Boolean(resource.is_subscribed);
-
         if (locallySubscribed && !resource.is_subscribed) {
           logger.debug(
-            { resourceName: resource.name, normalizedName: normalizeResourceName(resource.name), apiIsSubscribed: resource.is_subscribed },
+            { resourceName: resource.name, normalizedName, apiIsSubscribed: resource.is_subscribed },
             'search_resources: overriding is_subscribed=false from API with local promptManager state (true)',
           );
         }

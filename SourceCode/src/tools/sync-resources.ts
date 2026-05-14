@@ -1274,12 +1274,29 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
       ? Math.round(((tally.synced + tally.cached + tally.skipped) / tally.total) * 100)
       : 100;
 
+    const pendingSetup = localActions.flatMap((action) => {
+      if (action.action !== 'merge_mcp_json' || !action.missing_env || action.missing_env.length === 0) {
+        return [];
+      }
+
+      return [{
+        server_name: action.server_name,
+        mcp_json_path: action.mcp_json_path,
+        missing_env: action.missing_env,
+        command_needs_verification: typeof action.entry.command === 'string',
+        command: typeof action.entry.command === 'string' ? action.entry.command : '',
+        setup_hint: action.setup_hint ?? `Fill in env vars for MCP server "${action.server_name}".`,
+        ...(action.setup_doc ? { setup_doc: action.setup_doc } : {}),
+      }];
+    });
+
     const result: SyncResourcesResult = {
       mode,
       health_score: healthScore,
       summary: tally,
       details,
       ...(skippedResources.length > 0 ? { skipped_resources: skippedResources } : {}),
+      ...(pendingSetup.length > 0 ? { pending_setup: pendingSetup } : {}),
       ...(localActions.length > 0 ? { local_actions_required: localActions } : {}),
       ...(restartRequired ? { restart_required: true, restart_hint: restartHint } : {}),
     };

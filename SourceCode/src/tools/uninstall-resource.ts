@@ -86,8 +86,10 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
       if (removeFromAccount) {
         for (const r of removedResources) {
           try {
-            await apiClient.unsubscribe(r.id, typedParams.user_token);
-            subscriptionRemoved = true;
+            const unsubscribeResult = await apiClient.unsubscribe(r.id, typedParams.user_token);
+            if (unsubscribeResult.removed_count > 0) {
+              subscriptionRemoved = true;
+            }
           } catch (err) {
             logger.warn({ resourceId: r.id, err }, 'Failed to unsubscribe Command/Skill Prompt from account');
           }
@@ -193,8 +195,10 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
     // Remove from server subscription if requested
     if (removeFromAccount) {
       try {
-        await apiClient.unsubscribe(pattern);
-        subscriptionRemoved = true;
+        const unsubscribeResult = await apiClient.unsubscribe(pattern);
+        if (unsubscribeResult.removed_count > 0) {
+          subscriptionRemoved = true;
+        }
       } catch (err) {
         logger.warn({ pattern, err }, 'Failed to unsubscribe resource from account');
       }

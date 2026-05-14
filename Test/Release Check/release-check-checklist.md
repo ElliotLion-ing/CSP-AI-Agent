@@ -676,32 +676,35 @@ echo "检查点已清理，继续 Case C0-3"
 
 #### Case C0-3：Skill 运行验证（zoom-build sync + 文件写入）
 
-**目的：** 验证 Codex profile 下，skill 文件写入路径与 Cursor 一致（均写入 `~/.csp-ai-agent/skills/`），且 scripts 可执行权限正确。
+**目的：** 验证 Codex profile 下，skill 文件写入 Codex 专属路径 `~/.csp-ai-agent/codex/skills/`（与 Cursor 的 `~/.csp-ai-agent/skills/` **不同**），且 scripts 可执行权限正确。
 
 模拟用户语句（在 Codex 中执行）：
 > "小助手，帮我 sync 一下 zoom-build"
 
 **AI 执行路径验证：**
 1. 调用 `sync_resources(mode: "incremental", resource_ids: ["6dea7a2c8cf83e5d227ee39035411730"])`
-2. 检查 `local_actions_required` 中的 `write_file` action，确认路径为 `~/.csp-ai-agent/skills/zoom-build/`（与 Cursor **相同**路径）
+2. 检查 `local_actions_required` 中的 `write_file` action，确认路径为 `~/.csp-ai-agent/codex/skills/zoom-build/`（Codex **专属**路径，与 Cursor 的 `~/.csp-ai-agent/skills/zoom-build/` 不同）
 3. 执行 write_file actions，写入 scripts 和 teams 文件
 
 **文件系统验证：**
 
 ```bash
-ls ~/.csp-ai-agent/skills/zoom-build/scripts/
-ls ~/.csp-ai-agent/skills/zoom-build/teams/
+ls ~/.csp-ai-agent/codex/skills/zoom-build/scripts/
+ls ~/.csp-ai-agent/codex/skills/zoom-build/teams/
 # 验证脚本可执行权限
-ls -la ~/.csp-ai-agent/skills/zoom-build/scripts/build-cli
+ls -la ~/.csp-ai-agent/codex/skills/zoom-build/scripts/build-cli
+# 确认 Cursor 路径下不存在（路径隔离验证）
+ls ~/.csp-ai-agent/skills/zoom-build/ 2>&1 || echo "PASS: Cursor 路径下无 Codex skill 文件"
 ```
 
 | 验证项 | 预期行为 | 实际结果 | 通过？ |
 |--------|----------|----------|--------|
 | sync 正常返回 | success: true，details 包含 zoom-build | | |
-| write_file 路径与 Cursor 一致 | 路径为 `~/.csp-ai-agent/skills/zoom-build/`（不是 `~/.codex/...`） | | |
-| scripts 目录存在 | `~/.csp-ai-agent/skills/zoom-build/scripts/` 含 build-cli 等文件 | | |
-| teams 目录存在 | `~/.csp-ai-agent/skills/zoom-build/teams/` 含 JSON 配置文件 | | |
+| write_file 路径为 Codex 专属路径 | 路径为 `~/.csp-ai-agent/codex/skills/zoom-build/`（不是 `~/.csp-ai-agent/skills/` 也不是 `~/.codex/...`） | | |
+| scripts 目录存在 | `~/.csp-ai-agent/codex/skills/zoom-build/scripts/` 含 build-cli 等文件 | | |
+| teams 目录存在 | `~/.csp-ai-agent/codex/skills/zoom-build/teams/` 含 JSON 配置文件 | | |
 | build-cli 可执行权限 | `-rwxr-xr-x`（755）| | |
+| Cursor 路径隔离 | `~/.csp-ai-agent/skills/zoom-build/` 下无 Codex 写入的文件 | | |
 | 无 merge_toml 用于 skill 路径 | skill 文件全部通过 write_file，不混入 merge_toml | | |
 
 ---
@@ -721,9 +724,9 @@ ls -la ~/.csp-ai-agent/skills/zoom-build/scripts/build-cli
 |------|------|----------------|--------|
 | C1 | 全量 incremental sync | 同 Cursor；额外确认无 Cursor 特有路径写入（无 `~/.cursor/rules/` 写入） | |
 | C2 | 单资源 sync | 同 Cursor | |
-| C3 | 复杂 Skill sync（zoom-build） | 验证 Case C0-3 路径一致性 | |
+| C3 | 复杂 Skill sync（zoom-build） | **Codex 特有**：文件写入 `~/.csp-ai-agent/codex/skills/zoom-build/`，非 Cursor 的 `~/.csp-ai-agent/skills/zoom-build/` | |
 | C4 | 搜索 → 订阅 → Prompt 刷新 | 同 Cursor | |
-| C5 | 取消订阅 → 文件清理 | zoom-build 目录清理路径同 Cursor（`~/.csp-ai-agent/`） | |
+| C5 | 取消订阅 → 文件清理 | **Codex 特有**：清理路径为 `~/.csp-ai-agent/codex/skills/zoom-build/`，非 Cursor 的 `~/.csp-ai-agent/skills/zoom-build/` | |
 | C6 | 模糊调用路由（CSP 优先） | 验证 policy 注入生效（见 C0-2），Codex Agent 主动调用 manage_subscription | |
 | C7 | Telemetry 计数 | 额外验证 telemetry payload 中 `agent_profile = "codex"` | |
 | C8 | Sync 内容一致性 | 同 Cursor（manifest 版本验证） | |
