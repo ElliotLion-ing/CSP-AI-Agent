@@ -128,11 +128,22 @@ export async function resolvePromptContent(
   // Codex may resolve the real prompt body without ever fetching the synthetic
   // csp-ai-agent-setup prompt. To keep the legacy Cursor setup flow intact
   // while unblocking Codex, also surface any resource-specific pending local
-  // actions here. The cache is consumed on delivery, matching setup-prompt
-  // semantics: once the agent receives the actions, execution responsibility
-  // moves to the client.
+  // actions here.  Do NOT consume them: resolve_prompt_content has no
+  // acknowledgement proving the agent actually executed write_file actions.
+  // Keeping the cache pending lets search_resources continue to report
+  // is_installed=false until the setup prompt consumes the actions.
   const resourceLocalActions: LocalAction[] | undefined = userToken
-    ? promptManager.consumeSyncActionsForResource(userToken, resolved.meta.resource_name)
+    ? promptManager.peekSyncActionsForResource(userToken, resolved.meta.resource_name)
+    : undefined;
+
+  const localActionsSummary = resourceLocalActions && resourceLocalActions.length > 0
+    ? {
+        action_count: resourceLocalActions.length,
+        action_types: Array.from(new Set(resourceLocalActions.map((action) => action.action))),
+        message:
+          'Execute every local_actions_required item before treating this resource as installed. ' +
+          'These actions are intentionally repeated until the setup prompt consumes them.',
+      }
     : undefined;
 
   return {
@@ -143,12 +154,16 @@ export async function resolvePromptContent(
       resource_type: resolved.meta.resource_type,
       resource_name: resolved.meta.resource_name,
       description: resolved.description,
+      ...(resourceLocalActions && resourceLocalActions.length > 0
+        ? {
+            setup_required: true,
+            local_actions_summary: localActionsSummary,
+            local_actions_required: resourceLocalActions,
+          }
+        : {}),
       content: resolved.content,
       content_source: resolved.contentSource,
       usage_tracked: usageRecorded,
-      ...(resourceLocalActions && resourceLocalActions.length > 0
-        ? { local_actions_required: resourceLocalActions }
-        : {}),
     },
   };
 }

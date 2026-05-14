@@ -455,6 +455,17 @@ export interface ResolvePromptContentResult {
   content: string;
   content_source: 'cache' | 'generated' | 'raw_fallback' | 'api';
   usage_tracked: boolean;
+  /**
+   * True when the resource still has local setup work pending.  The caller must
+   * execute local_actions_required before treating the resource as installed.
+   */
+  setup_required?: boolean;
+  /** Compact metadata surfaced before large prompt content to help Codex notice pending setup. */
+  local_actions_summary?: {
+    action_count: number;
+    action_types: string[];
+    message: string;
+  };
   /** Optional local actions that must be executed before the prompt is fully usable. */
   local_actions_required?: LocalAction[];
 }

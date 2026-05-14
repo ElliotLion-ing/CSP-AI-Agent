@@ -122,6 +122,23 @@ export class PromptManager {
   private readonly userRestartHints = new Map<string, string>();
 
   /**
+   * Per-user local opt-out set for subscriptions that the CSP API still returns.
+   *
+   * Some baseline/default subscriptions are returned by the server with no
+   * removable user subscription row.  The remove API may therefore report
+   * removed_count=0 even though the user explicitly unsubscribed.  We keep this
+   * local override so list/search/sync remain consistent for the current MCP
+   * process without changing server-side defaults for other clients.
+   */
+  private readonly locallyUnsubscribedResourceIds = new Map<string, Set<string>>();
+
+  /**
+   * Monotonic per-user state version used by tools that cache derived
+   * subscription/install status.
+   */
+  private readonly subscriptionStateVersions = new Map<string, number>();
+
+  /**
    * Tracks which Server instances already have handlers installed.
    * Each SSE connection creates a new Server instance, so we track per-instance
    * rather than using a global boolean flag (which would skip registration on
@@ -181,6 +198,82 @@ export class PromptManager {
     return map;
   }
 
+  private bumpSubscriptionStateVersion(userToken: string): void {
+    this.subscriptionStateVersions.set(
+      userToken,
+      (this.subscriptionStateVersions.get(userToken) ?? 0) + 1,
+    );
+  }
+
+  getSubscriptionStateVersion(userToken: string): number {
+    return this.subscriptionStateVersions.get(userToken) ?? 0;
+  }
+
+  suppressSubscriptions(userToken: string, resourceIds: string[]): void {
+    if (resourceIds.length === 0) return;
+
+    let set = this.locallyUnsubscribedResourceIds.get(userToken);
+    if (!set) {
+      set = new Set<string>();
+      this.locallyUnsubscribedResourceIds.set(userToken, set);
+    }
+
+    let changed = false;
+    for (const id of resourceIds) {
+      if (!set.has(id)) {
+        set.add(id);
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      this.bumpSubscriptionStateVersion(userToken);
+      logger.info(
+        {
+          resourceIds,
+          userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
+        },
+        'PromptManager: applied local subscription suppression',
+      );
+    }
+  }
+
+  clearSuppressedSubscriptions(userToken: string, resourceIds: string[]): void {
+    const set = this.locallyUnsubscribedResourceIds.get(userToken);
+    if (!set || resourceIds.length === 0) return;
+
+    let changed = false;
+    for (const id of resourceIds) {
+      if (set.delete(id)) {
+        changed = true;
+      }
+    }
+    if (set.size === 0) {
+      this.locallyUnsubscribedResourceIds.delete(userToken);
+    }
+
+    if (changed) {
+      this.bumpSubscriptionStateVersion(userToken);
+      logger.info(
+        {
+          resourceIds,
+          userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
+        },
+        'PromptManager: cleared local subscription suppression',
+      );
+    }
+  }
+
+  isSubscriptionSuppressed(userToken: string, resourceId: string): boolean {
+    return this.locallyUnsubscribedResourceIds.get(userToken)?.has(resourceId) ?? false;
+  }
+
+  filterSuppressedSubscriptions<T extends { id: string }>(userToken: string, subscriptions: T[]): T[] {
+    const suppressed = this.locallyUnsubscribedResourceIds.get(userToken);
+    if (!suppressed || suppressed.size === 0) return subscriptions;
+    return subscriptions.filter((subscription) => !suppressed.has(subscription.id));
+  }
+
   /**
    * Cache the local_actions_required result from the most recent background
    * sync for a user.  Called by http.ts after oninitialized sync completes.
@@ -190,6 +283,7 @@ export class PromptManager {
    */
   storeSyncActions(userToken: string, actions: LocalAction[]): void {
     this.userSyncActions.set(userToken, actions);
+    this.bumpSubscriptionStateVersion(userToken);
     logger.info(
       {
         userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
@@ -235,6 +329,7 @@ export class PromptManager {
     const actions = this.userSyncActions.get(userToken);
     if (actions !== undefined) {
       this.userSyncActions.delete(userToken);
+      this.bumpSubscriptionStateVersion(userToken);
       logger.info(
         {
           userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
@@ -244,6 +339,22 @@ export class PromptManager {
       );
     }
     return actions;
+  }
+
+  /**
+   * Read resource-specific pending local actions without consuming them.
+   *
+   * resolve_prompt_content has no acknowledgement channel proving the caller
+   * executed returned write_file/delete_file actions, so it must not clear the
+   * cache.  The setup prompt remains the only consuming path.
+   */
+  peekSyncActionsForResource(userToken: string, resourceName: string): LocalAction[] | undefined {
+    const actions = this.userSyncActions.get(userToken);
+    if (!actions || actions.length === 0) return undefined;
+
+    const normalizedName = resourceName.toLowerCase().replace(/\s+/g, '-');
+    const matched = actions.filter((action) => this.actionReferencesResource(action, normalizedName));
+    return matched.length > 0 ? matched : undefined;
   }
 
   /**
@@ -296,6 +407,7 @@ export class PromptManager {
     } else {
       this.userSyncActions.delete(userToken);
     }
+    this.bumpSubscriptionStateVersion(userToken);
 
     logger.info(
       {
@@ -851,6 +963,7 @@ export class PromptManager {
    */
   async registerPrompt(meta: PromptResourceMeta, userToken: string): Promise<void> {
     const name = this.buildPromptName(meta);
+    this.clearSuppressedSubscriptions(userToken, [meta.resource_id]);
 
     // Generate and write the intermediate cache file (shared across users since
     // content is the same; only the in-memory registry is per-user).
@@ -899,6 +1012,7 @@ export class PromptManager {
     // Only fire for genuinely new prompts — refreshing existing ones does not
     // change the list from the client's perspective.
     if (isNewPrompt) {
+      this.bumpSubscriptionStateVersion(userToken);
       this.notifyPromptsChanged(userToken);
     }
   }
@@ -938,6 +1052,7 @@ export class PromptManager {
     // Notify connected MCP clients that the prompt list has changed so Cursor
     // removes the prompt immediately without requiring a reconnect.
     if (wasRegistered) {
+      this.bumpSubscriptionStateVersion(userToken);
       this.notifyPromptsChanged(userToken);
     }
   }
@@ -1025,6 +1140,7 @@ export class PromptManager {
     }
 
     if (pruned.length > 0) {
+      this.bumpSubscriptionStateVersion(userToken);
       logger.info(
         {
           prunedCount: pruned.length,

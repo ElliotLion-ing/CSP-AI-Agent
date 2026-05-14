@@ -45,6 +45,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           undefined,
           typedParams.user_token
         );
+        promptManager.clearSuppressedSubscriptions(typedParams.user_token ?? '', typedParams.resource_ids);
 
         logger.info({ count: subResult.subscriptions.length }, 'Resources subscribed successfully');
 
@@ -154,11 +155,21 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           logger.warn({ error: (e as Error).message }, 'Could not fetch subscriptions for type resolution — uninstall will emit both rule+mcp actions as fallback');
         }
 
-        // Cancel server-side subscription
+        // Cancel server-side subscription.  Baseline/default subscriptions may
+        // be exposed by list/search but have no removable user row on the
+        // server; in that case the API returns removed_count=0.  Do not abort
+        // local cleanup here: apply a local suppression after verification so
+        // prompts/list/search/sync are consistent for this user.
         const unsubscribeResponse = await apiClient.unsubscribe(typedParams.resource_ids, typedParams.user_token);
-        if (unsubscribeResponse.removed_count !== typedParams.resource_ids.length) {
-          throw new Error(
-            `Unsubscribe API reported partial removal: requested=${unsubscribeResponse.requested_count}, removed=${unsubscribeResponse.removed_count}`,
+        const serverRemovedAll = unsubscribeResponse.removed_count === typedParams.resource_ids.length;
+        if (!serverRemovedAll) {
+          logger.warn(
+            {
+              requested: unsubscribeResponse.requested_count,
+              removed: unsubscribeResponse.removed_count,
+              resourceIds: typedParams.resource_ids,
+            },
+            'Unsubscribe API reported partial removal; continuing local cleanup and will verify list state',
           );
         }
         logger.info(
@@ -278,6 +289,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         // The API may have a short propagation delay before list reflects the removal.
         const removedIds = new Set(typedParams.resource_ids);
         let verifiedRemoval = false;
+        let stillPresentIds: string[] = [];
         for (let attempt = 0; attempt < 3; attempt++) {
           if (attempt > 0) {
             await new Promise((resolve) => setTimeout(resolve, 300));
@@ -285,6 +297,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           try {
             const verifySubs = await apiClient.getSubscriptions({}, typedParams.user_token);
             const stillPresent = verifySubs.subscriptions.filter((s) => removedIds.has(s.id));
+            stillPresentIds = stillPresent.map((s) => s.id);
             if (stillPresent.length === 0) {
               verifiedRemoval = true;
               break;
@@ -302,10 +315,20 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           }
         }
 
+        const localSuppressionApplied = stillPresentIds.length > 0;
+        if (localSuppressionApplied) {
+          promptManager.suppressSubscriptions(typedParams.user_token ?? '', stillPresentIds);
+          verifiedRemoval = true;
+          logger.info(
+            { stillPresentIds },
+            'manage_subscription unsubscribe: applied local suppression for server-visible default subscriptions',
+          );
+        }
+
         if (!verifiedRemoval) {
           logger.warn(
             { resourceIds: typedParams.resource_ids },
-            'manage_subscription unsubscribe: server list still shows resources after 3 verification attempts — possible API propagation delay',
+            'manage_subscription unsubscribe: server list still shows resources after 3 verification attempts and no local suppression was applied',
           );
         }
 
@@ -319,8 +342,11 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             unsubscribeLocalActions.length > 0
               ? `IMPORTANT: You MUST execute ALL ${unsubscribeLocalActions.length} action(s) in local_actions_required immediately to delete local skill files and manifests. Do not skip any delete_file action.`
               : null,
+            localSuppressionApplied
+              ? `NOTE: ${stillPresentIds.length} default/baseline subscription${stillPresentIds.length > 1 ? 's were' : ' was'} still returned by the server, so a local unsubscribe override was applied for this MCP session.`
+              : null,
             !verifiedRemoval
-              ? `WARNING: The server subscription list may still show these resources due to propagation delay. If manage_subscription(list) still returns them, wait 1-2 seconds and retry — the removal is confirmed server-side.`
+              ? `WARNING: The server subscription list may still show these resources due to propagation delay. If manage_subscription(list) still returns them, wait 1-2 seconds and retry.`
               : null,
           ].filter(Boolean).join(' '),
           sync_details: uninstallResults.map(r => ({ id: r.id, name: r.id, action: r.removed ? 'uninstalled' : 'not_found_locally' })),
@@ -336,20 +362,28 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
 
         // Get subscriptions list
         const subs = await apiClient.getSubscriptions({}, typedParams.user_token);
+        const visibleSubscriptions = promptManager.filterSuppressedSubscriptions(
+          typedParams.user_token ?? '',
+          subs.subscriptions,
+        );
+        const hiddenCount = subs.subscriptions.length - visibleSubscriptions.length;
 
         result = {
           action: 'list',
           success: true,
-          subscriptions: subs.subscriptions.map(sub => ({
+          subscriptions: visibleSubscriptions.map(sub => ({
             id: sub.id,
             name: sub.name,
             type: sub.type,
             subscribed_at: sub.subscribed_at,
           })),
-          message: `Found ${subs.total} subscription${subs.total !== 1 ? 's' : ''}`,
+          message: [
+            `Found ${visibleSubscriptions.length} subscription${visibleSubscriptions.length !== 1 ? 's' : ''}`,
+            hiddenCount > 0 ? `(${hiddenCount} locally unsubscribed default subscription${hiddenCount > 1 ? 's are' : ' is'} hidden)` : null,
+          ].filter(Boolean).join(' '),
         };
 
-        logger.info({ total: subs.total }, 'Subscriptions listed successfully');
+        logger.info({ total: visibleSubscriptions.length, hiddenCount }, 'Subscriptions listed successfully');
         break;
       }
 
@@ -371,6 +405,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           undefined,
           typedParams.user_token
         );
+        promptManager.clearSuppressedSubscriptions(typedParams.user_token ?? '', typedParams.resource_ids);
 
         logger.info({ count: batchSubResult.subscriptions.length }, 'Batch subscription completed');
 

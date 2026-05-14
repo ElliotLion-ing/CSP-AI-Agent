@@ -3,6 +3,7 @@
  * Search for available resources
  */
 
+import { createHash } from 'crypto';
 import { logger, logToolCall } from '../utils/logger';
 import { apiClient } from '../api/client';
 import { filesystemManager } from '../filesystem/manager';
@@ -25,10 +26,14 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
  * Generate cache key from search parameters
  */
 function getCacheKey(params: SearchResourcesParams): string {
+  const userToken = params.user_token ?? '';
   return JSON.stringify({
     team: params.team || '',
     type: params.type || '',
     keyword: params.keyword || '',
+    agent_profile: params.agent_profile || config.agentProfile || 'cursor',
+    user: userToken ? createHash('sha256').update(userToken).digest('hex').slice(0, 16) : '',
+    subscription_state_version: promptManager.getSubscriptionStateVersion(userToken),
   });
 }
 
@@ -145,7 +150,10 @@ export async function searchResources(params: unknown): Promise<ToolResult<Searc
       enhancedResults.map(async (resource) => {
         const normalizedName = normalizeResourceName(resource.name);
         const locallySubscribed = localSubscribedNames.has(normalizedName);
-        const isSubscribed = locallySubscribed || Boolean(resource.is_subscribed);
+        const locallySuppressed = promptManager.isSubscriptionSuppressed(userToken, resource.id);
+        const isSubscribed = locallySuppressed
+          ? locallySubscribed
+          : locallySubscribed || Boolean(resource.is_subscribed);
 
         // Check if installed locally.
         //
@@ -182,6 +190,12 @@ export async function searchResources(params: unknown): Promise<ToolResult<Searc
           logger.debug(
             { resourceName: resource.name, normalizedName, apiIsSubscribed: resource.is_subscribed },
             'search_resources: overriding is_subscribed=false from API with local promptManager state (true)',
+          );
+        }
+        if (locallySuppressed && resource.is_subscribed && !locallySubscribed) {
+          logger.debug(
+            { resourceName: resource.name, resourceId: resource.id },
+            'search_resources: overriding is_subscribed=true from API with local unsubscribe suppression (false)',
           );
         }
 

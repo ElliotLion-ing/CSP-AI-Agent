@@ -247,6 +247,11 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
     const t1 = Date.now();
 
     const allSubscriptions = await apiClient.getSubscriptions({ types }, userToken);
+    const visibleAllSubscriptions = {
+      ...allSubscriptions,
+      subscriptions: promptManager.filterSuppressedSubscriptions(userToken ?? '', allSubscriptions.subscriptions),
+    };
+    visibleAllSubscriptions.total = visibleAllSubscriptions.subscriptions.length;
 
     // Apply resource_ids filter if provided — only process the specified resources.
     // This is done client-side: the subscription list API has no resource_ids filter,
@@ -254,10 +259,10 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
     // processing is efficient regardless.
     const subscriptions = resourceIds
       ? {
-          total: allSubscriptions.subscriptions.filter(s => resourceIds.has(s.id)).length,
-          subscriptions: allSubscriptions.subscriptions.filter(s => resourceIds.has(s.id)),
+          total: visibleAllSubscriptions.subscriptions.filter(s => resourceIds.has(s.id)).length,
+          subscriptions: visibleAllSubscriptions.subscriptions.filter(s => resourceIds.has(s.id)),
         }
-      : allSubscriptions;
+      : visibleAllSubscriptions;
 
     logToolStep('sync_resources', 'Subscriptions fetched', {
       totalFromApi: allSubscriptions.total,
