@@ -511,6 +511,8 @@ export interface UploadResourceResult {
 // uninstall_resource
 export interface UninstallResourceParams {
   resource_id_or_name: string;
+  /** Canonical CSP resource ID. Used internally to resolve MCP config keys during cleanup. */
+  resource_id?: string;
   remove_from_account?: boolean;
   /** When known, the resource type — narrows which local_actions are emitted. */
   resource_type?: 'command' | 'skill' | 'rule' | 'mcp';

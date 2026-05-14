@@ -14,6 +14,84 @@ import { MCPServerError, createValidationError } from '../types/errors';
 import type { UninstallResourceParams, UninstallResourceResult, LocalAction, ToolResult } from '../types/tools';
 import { promptManager } from '../prompts/index.js';
 
+type DownloadedResourceFile = {
+  path: string;
+  content: string;
+};
+
+function uniqueServerNames(names: string[]): string[] {
+  return Array.from(new Set(names.map((name) => name.trim()).filter(Boolean)));
+}
+
+function extractMcpServerNamesFromConfig(content: string, fallbackName: string): string[] {
+  try {
+    const config = JSON.parse(content) as unknown;
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      return [fallbackName];
+    }
+
+    const record = config as Record<string, unknown>;
+
+    // Format A: a single local command MCP config.
+    if (typeof record.command === 'string') {
+      return uniqueServerNames([typeof record.name === 'string' ? record.name : fallbackName]);
+    }
+
+    // Format B: a map of server names to remote MCP config entries.
+    const serverNames = Object.entries(record)
+      .filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value))
+      .map(([serverName]) => serverName);
+
+    return uniqueServerNames(serverNames.length > 0 ? serverNames : [fallbackName]);
+  } catch (error) {
+    logger.warn({ fallbackName, error: (error as Error).message }, 'Failed to parse mcp-config.json for uninstall server names');
+    return [fallbackName];
+  }
+}
+
+async function resolveMcpServerNamesForUninstall(params: UninstallResourceParams, fallbackName: string): Promise<string[]> {
+  const candidateResourceIds = uniqueServerNames([params.resource_id ?? '']);
+
+  if (!params.resource_id) {
+    try {
+      const subscriptions = await apiClient.getSubscriptions({}, params.user_token);
+      for (const sub of subscriptions.subscriptions) {
+        if (sub.type === 'mcp' && (sub.id === params.resource_id_or_name || sub.name === params.resource_id_or_name || sub.name === fallbackName)) {
+          candidateResourceIds.push(sub.id);
+        }
+      }
+    } catch (error) {
+      logger.debug(
+        { fallbackName, error: (error as Error).message },
+        'Could not list subscriptions while resolving MCP uninstall server names',
+      );
+    }
+  }
+
+  candidateResourceIds.push(params.resource_id_or_name);
+
+  for (const resourceId of uniqueServerNames(candidateResourceIds)) {
+    try {
+      const downloaded = await apiClient.downloadResource(resourceId, params.user_token);
+      const configFile = (downloaded.files as DownloadedResourceFile[] | undefined)?.find((file) =>
+        file.path.split(/[\\/]/).pop() === 'mcp-config.json',
+      );
+
+      if (configFile) {
+        const serverNames = extractMcpServerNamesFromConfig(configFile.content, fallbackName);
+        logger.info({ resourceId, serverNames }, 'Resolved MCP server names for uninstall from mcp-config.json');
+        return serverNames;
+      }
+    } catch (error) {
+      logger.debug(
+        { resourceId, error: (error as Error).message },
+        'Could not download MCP resource config while resolving uninstall server names',
+      );
+    }
+  }
+
+  return [fallbackName];
+}
 
 export async function uninstallResource(params: unknown): Promise<ToolResult<UninstallResourceResult>> {
   const startTime = Date.now();
@@ -153,32 +231,39 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
     }
 
     if (isMcp) {
+      const serverNames = await resolveMcpServerNamesForUninstall(typedParams, pattern);
+
       if (agentProfile === 'codex') {
         // Codex MCP resources are configured through ~/.codex/config.toml.
         // Do not emit Cursor install-dir cleanup here; remote URL MCPs do not
         // have a Codex-local install directory, and Cursor cleanup paths are
         // wrong for Codex release checks.
         const tomlPath = getCodexConfigTomlPathForClient();
-        localActions.push({
-          action: 'remove_toml_entry',
-          toml_path: tomlPath,
-          server_name: pattern,
-        });
+        for (const serverName of serverNames) {
+          localActions.push({
+            action: 'remove_toml_entry',
+            toml_path: tomlPath,
+            server_name: serverName,
+          });
+          removedResources.push({ id: pattern, name: serverName, path: `${tomlPath}:[mcp_servers.${serverName}]` });
+        }
         logger.info(
-          { pattern, tomlPath, agentProfile },
+          { pattern, serverNames, tomlPath, agentProfile },
           'uninstall_resource: Codex MCP — remove_toml_entry queued for config.toml',
         );
-        removedResources.push({ id: pattern, name: pattern, path: `${tomlPath}:[mcp_servers.${pattern}]` });
       } else {
         // Cursor: delete install directory (Format A — may not exist for
-        // remote-URL MCPs) and remove from mcp.json.
+        // remote-URL MCPs) and remove all server keys from mcp.json.
         const mcpDir = getCursorTypeDirForClient('mcp');
         const mcpInstallDir = `${mcpDir}/${pattern}`;
         localActions.push({ action: 'delete_file', path: mcpInstallDir, recursive: true });
         // Cursor (default): remove from mcp.json
-        localActions.push({ action: 'remove_mcp_json_entry', mcp_json_path: mcpJsonPath, server_name: pattern });
+        for (const serverName of serverNames) {
+          localActions.push({ action: 'remove_mcp_json_entry', mcp_json_path: mcpJsonPath, server_name: serverName });
+          removedResources.push({ id: pattern, name: serverName, path: `${mcpJsonPath}:mcpServers.${serverName}` });
+        }
         logger.info(
-          { pattern, mcpJsonPath, agentProfile },
+          { pattern, serverNames, mcpJsonPath, agentProfile },
           'uninstall_resource: Cursor MCP — remove_mcp_json_entry queued for mcp.json',
         );
         removedResources.push({ id: pattern, name: pattern, path: mcpInstallDir });

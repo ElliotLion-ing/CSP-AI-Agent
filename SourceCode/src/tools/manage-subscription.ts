@@ -252,7 +252,9 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           for (const pattern of patternsToTry) {
             const uninstallResult = await uninstallResource({
               resource_id_or_name: pattern,
+              resource_id: resourceId,
               remove_from_account: false, // already unsubscribed above
+              user_token: typedParams.user_token,
               ...(resolvedType ? { resource_type: resolvedType } : {}),
               // Always forward the resolved agent_profile so uninstall_resource emits
               // the correct config action:
