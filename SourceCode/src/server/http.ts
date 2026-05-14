@@ -18,6 +18,9 @@ import { telemetry } from '../telemetry/index.js';
 import { promptManager } from '../prompts/index.js';
 import type { AgentProfile } from '../client-adapters/index.js';
 
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const SERVER_VERSION: string = (require('../../package.json') as { version: string }).version;
+
 // Inject syncResources into promptManager for post-restart recovery.
 // Must be done after both modules are loaded to avoid circular-import issues.
 promptManager.setSyncResourcesFn(syncResources);
@@ -486,7 +489,7 @@ export function createMcpServerInstance(
   // Resolve the active profile: caller > server-wide config > default 'cursor'.
   const resolvedProfile: AgentProfile = agentProfile ?? config.agentProfile ?? 'cursor';
   const server = new Server(
-    { name: 'csp-ai-agent-mcp', version: '0.2.0' },
+    { name: 'csp-ai-agent-mcp', version: SERVER_VERSION },
     { capabilities: { tools: {}, prompts: {}, logging: {} } },
   );
 

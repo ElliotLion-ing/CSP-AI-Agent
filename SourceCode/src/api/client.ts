@@ -8,6 +8,9 @@ import { config } from '../config';
 import { logger, logApiRequest, logApiError } from '../utils/logger';
 import { createAPIError } from '../types/errors';
 
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const SERVER_VERSION: string = (require('../../package.json') as { version: string }).version;
+
 // Extended Axios config with timing metadata
 interface TimedAxiosRequestConfig extends InternalAxiosRequestConfig {
   startTime?: number;
@@ -24,7 +27,7 @@ class APIClient {
       timeout: config.csp.timeout,
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': `csp-ai-agent-mcp/0.2.5`,
+        'User-Agent': `csp-ai-agent-mcp/${SERVER_VERSION}`,
       },
     });
 
