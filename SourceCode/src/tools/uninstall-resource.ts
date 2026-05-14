@@ -153,15 +153,11 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
     }
 
     if (isMcp) {
-      // MCP: delete install directory (Format A — may not exist for remote-URL MCPs)
-      // and remove the config entry from the appropriate client config file.
-      const mcpDir = getCursorTypeDirForClient('mcp');
-      const mcpInstallDir = `${mcpDir}/${pattern}`;
-      localActions.push({ action: 'delete_file', path: mcpInstallDir, recursive: true });
-
       if (agentProfile === 'codex') {
-        // Codex uses config.toml; emit remove_toml_entry so the AI removes
-        // the [mcp_servers.<server_name>] section from ~/.codex/config.toml.
+        // Codex MCP resources are configured through ~/.codex/config.toml.
+        // Do not emit Cursor install-dir cleanup here; remote URL MCPs do not
+        // have a Codex-local install directory, and Cursor cleanup paths are
+        // wrong for Codex release checks.
         const tomlPath = getCodexConfigTomlPathForClient();
         localActions.push({
           action: 'remove_toml_entry',
@@ -172,16 +168,21 @@ export async function uninstallResource(params: unknown): Promise<ToolResult<Uni
           { pattern, tomlPath, agentProfile },
           'uninstall_resource: Codex MCP — remove_toml_entry queued for config.toml',
         );
+        removedResources.push({ id: pattern, name: pattern, path: `${tomlPath}:[mcp_servers.${pattern}]` });
       } else {
+        // Cursor: delete install directory (Format A — may not exist for
+        // remote-URL MCPs) and remove from mcp.json.
+        const mcpDir = getCursorTypeDirForClient('mcp');
+        const mcpInstallDir = `${mcpDir}/${pattern}`;
+        localActions.push({ action: 'delete_file', path: mcpInstallDir, recursive: true });
         // Cursor (default): remove from mcp.json
         localActions.push({ action: 'remove_mcp_json_entry', mcp_json_path: mcpJsonPath, server_name: pattern });
         logger.info(
           { pattern, mcpJsonPath, agentProfile },
           'uninstall_resource: Cursor MCP — remove_mcp_json_entry queued for mcp.json',
         );
+        removedResources.push({ id: pattern, name: pattern, path: mcpInstallDir });
       }
-
-      removedResources.push({ id: pattern, name: pattern, path: mcpInstallDir });
     }
 
     if (removedResources.length === 0 && localActions.length === 0) {

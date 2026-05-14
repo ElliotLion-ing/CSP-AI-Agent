@@ -149,6 +149,48 @@ function encodeForRender(
   };
 }
 
+function codexMcpUrl(url: string): string {
+  // Codex consumes Streamable HTTP MCP endpoints. Server-side MCP resource
+  // packages may still ship Cursor/SSE URLs for backward compatibility.
+  return url.replace(/\/sse\/?$/, '/mcp');
+}
+
+function toCodexMcpTomlEntry(entry: Record<string, unknown>): Record<string, unknown> {
+  const converted: Record<string, unknown> = { ...entry };
+
+  if (typeof converted.url === 'string') {
+    converted.url = codexMcpUrl(converted.url);
+  }
+
+  if (converted.headers && !converted.http_headers) {
+    converted.http_headers = converted.headers;
+    delete converted.headers;
+  }
+
+  // Codex infers HTTP MCP transport from `url`; keeping Cursor's `sse`
+  // transport marker in config.toml makes the generated config misleading.
+  if (converted.transport === 'sse' || converted.transport === 'streamable_http' || converted.transport === 'streamable-http') {
+    delete converted.transport;
+  }
+
+  return converted;
+}
+
+function queueCodexMcpTomlAction(
+  localActions: LocalAction[],
+  tomlPath: string,
+  serverName: string,
+  entry: Record<string, unknown>,
+): void {
+  localActions.push({
+    action: 'merge_toml',
+    toml_path: tomlPath,
+    key: `mcp_servers.${serverName}`,
+    value: JSON.stringify(toCodexMcpTomlEntry(entry)),
+    overwrite: false,
+  });
+}
+
 /**
  * Same as encodeForRender, but produces the field shape required by
  * CheckFileAction (`expected_content` + a sibling encoding hint stored as
@@ -937,23 +979,35 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             if (resolvedProfile === 'codex') {
               // ── Codex MCP: inject server entry into config.toml via merge_toml ──
               // The Codex CLI reads MCP server configuration from ~/.codex/config.toml.
-              // We emit a merge_toml action for the AI Agent to update that file.
-              // The value is the JSON-serialised mcp-config entry so the agent can
-              // parse and embed it in the correct TOML table.
+              // Format A becomes [mcp_servers.<name>]. Format B emits one
+              // table per remote server entry. URL entries are normalised from
+              // Cursor/SSE (`/sse`) to Codex Streamable HTTP (`/mcp`).
               const tomlPath = clientAdapter.getMcpConfigPath();
-              const serverName = (cfg['name'] as string | undefined) ?? sub.name;
-              localActions.push({
-                action: 'merge_toml',
-                toml_path: tomlPath,
-                key: `mcp.servers.${serverName}`,
-                value: JSON.stringify(cfg),
-                overwrite: false,
-              });
+              const queuedServers: string[] = [];
+
+              if (typeof cfg['command'] === 'string') {
+                const serverName = (cfg['name'] as string | undefined) ?? sub.name;
+                queueCodexMcpTomlAction(localActions, tomlPath, serverName, cfg);
+                queuedServers.push(serverName);
+              } else {
+                for (const [serverName, entry] of Object.entries(cfg)) {
+                  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+                    logger.warn(
+                      { resourceId: sub.id, resourceName: sub.name, serverName },
+                      'sync_resources: skipping invalid Codex MCP config entry',
+                    );
+                    continue;
+                  }
+                  queueCodexMcpTomlAction(localActions, tomlPath, serverName, entry as Record<string, unknown>);
+                  queuedServers.push(serverName);
+                }
+              }
+
               logger.info(
-                { resourceId: sub.id, resourceName: sub.name, serverName, tomlPath, profile: 'codex' },
+                { resourceId: sub.id, resourceName: sub.name, serverKeys: queuedServers, tomlPath, profile: 'codex' },
                 'sync_resources: Codex MCP — merge_toml action queued',
               );
-              logToolStep('sync_resources', 'Codex MCP: merge_toml queued', { resourceId: sub.id });
+              logToolStep('sync_resources', 'Codex MCP: merge_toml queued', { resourceId: sub.id, serverKeys: queuedServers });
             } else if (typeof cfg['command'] === 'string') {
               // ── Format A: local executable ──────────────────────────────────
               const installDir = `${getCursorTypeDirForClient('mcp')}/${sub.name}`;
@@ -1045,13 +1099,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             if (resolvedProfile === 'codex') {
               // Codex: emit a bare merge_toml with minimal entry
               const tomlPath = clientAdapter.getMcpConfigPath();
-              localActions.push({
-                action: 'merge_toml',
-                toml_path: tomlPath,
-                key: `mcp.servers.${sub.name}`,
-                value: JSON.stringify({ command: 'node', args: [] }),
-                overwrite: false,
-              });
+              queueCodexMcpTomlAction(localActions, tomlPath, sub.name, { command: 'node', args: [] });
               logger.info(
                 { resourceId: sub.id, resourceName: sub.name, tomlPath, profile: 'codex' },
                 'sync_resources: Codex MCP heuristic — merge_toml action queued (no mcp-config.json)',
@@ -1250,14 +1298,14 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
         });
 
         // 2. Inject the policy file reference into developer_instructions.
-        // overwrite: true so that each sync refreshes the reference (e.g. policy
-        // file path changed, or first-time injection after a Codex upgrade).
+        // overwrite: false keeps this action idempotent after the first
+        // successful setup, so restart hints do not force a re-apply loop.
         localActions.push({
           action: 'merge_toml',
           toml_path: tomlPath,
           key: tomlKey,
           value: `Please read and follow the CSP routing policy at: ${policyFile}`,
-          overwrite: true,
+          overwrite: false,
         });
 
         restartRequired = true;

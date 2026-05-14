@@ -750,8 +750,9 @@ export class PromptManager {
             `- **\`merge_mcp_json\`**: Read \`~/.cursor/mcp.json\` (create if missing), ` +
             `add or update \`mcpServers[server_name]\` with the \`entry\` object. Do not remove existing entries.\n` +
             `- **\`merge_toml\`**: Read the TOML file at \`toml_path\` (create if missing), ` +
-            `set or update the \`key\` (dot-notation) to \`value\`. When \`overwrite\` is false, ` +
-            `skip if the key already has a non-empty value. Write the file back.\n` +
+            `set or update the \`key\` (dot-notation) to \`value\`. If \`value\` is a JSON object and ` +
+            `\`key\` is like \`mcp_servers.<name>\`, write it as the TOML table \`[mcp_servers.<name>]\`. ` +
+            `When \`overwrite\` is false, skip only when the existing scalar/table is already non-empty. Write the file back.\n` +
             `- **\`delete_file\`**: Delete the file or directory at \`path\`. ` +
             `If \`recursive\` is true, delete the directory recursively. Skip if not found.\n` +
             `- **\`remove_mcp_json_entry\`**: Read \`~/.cursor/mcp.json\`, ` +
@@ -776,6 +777,10 @@ export class PromptManager {
             `Failure to apply \`mode\` will leave scripts non-executable — this breaks skill execution.**\n` +
             `- **\`merge_mcp_json\`**: Read \`~/.cursor/mcp.json\` (create if missing), ` +
             `add or update \`mcpServers[server_name]\` with the \`entry\` object. Do not remove existing entries.\n` +
+            `- **\`merge_toml\`**: Read the TOML file at \`toml_path\` (create if missing), ` +
+            `set or update the \`key\` (dot-notation) to \`value\`. If \`value\` is a JSON object and ` +
+            `\`key\` is like \`mcp_servers.<name>\`, write it as the TOML table \`[mcp_servers.<name>]\`. ` +
+            `When \`overwrite\` is false, skip only when the existing scalar/table is already non-empty. Write the file back.\n` +
             `- **\`delete_file\`**: Delete the file or directory at \`path\`. ` +
             `If \`recursive\` is true, delete the directory recursively. Skip if not found.\n` +
             `- **\`remove_mcp_json_entry\`**: Read \`~/.cursor/mcp.json\`, ` +

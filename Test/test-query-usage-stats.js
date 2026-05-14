@@ -108,6 +108,10 @@ assert(
   toolContent.includes('user_token?:'),
   'Tool supports user_token parameter'
 );
+assert(
+  toolContent.includes("agent_profile?: 'cursor' | 'codex'"),
+  'Tool supports agent_profile parameter'
+);
 
 // Test 8: Tool has correct return type
 assert(
@@ -129,6 +133,10 @@ assert(
 assert(
   toolContent.includes('resource_usage: UsageStatsResource[]'),
   'Result includes resource_usage array'
+);
+assert(
+  toolContent.includes('agent_profile: AgentProfile'),
+  'Result includes resolved agent_profile'
 );
 
 // Test 9: Tool has proper error handling

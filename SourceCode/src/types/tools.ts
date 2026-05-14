@@ -147,8 +147,9 @@ export interface CheckFileAction {
 /**
  * Instructs the AI Agent to merge or update a key inside a TOML config file.
  *
- * Primary use-case: injecting CSP routing policy content into Codex's
- * `developer_instructions` field in `~/.codex/config.toml`.
+ * Primary use-cases:
+ * - Inject CSP routing policy content into Codex's `developer_instructions`.
+ * - Add or update Codex MCP server tables under `[mcp_servers.<name>]`.
  *
  * Merge semantics:
  * - When the key does not exist: create it with `value`.
@@ -162,9 +163,9 @@ export interface MergeTomlAction {
   action: 'merge_toml';
   /** Absolute path to the TOML file (may start with ~). */
   toml_path: string;
-  /** Dot-notation key path in the TOML document (e.g. `developer_instructions`). */
+  /** Dot-notation key path in the TOML document (e.g. `developer_instructions` or `mcp_servers.acm`). */
   key: string;
-  /** String value to set for the key. */
+  /** String scalar or JSON-encoded object to set for the key/table. */
   value: string;
   /**
    * When true, replace an existing key value; when false, skip if the key
