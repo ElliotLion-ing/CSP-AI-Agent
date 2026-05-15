@@ -144,12 +144,59 @@ export interface CheckFileAction {
   resource_type: string;
 }
 
+/**
+ * Instructs the AI Agent to merge or update a key inside a TOML config file.
+ *
+ * Primary use-cases:
+ * - Inject CSP routing policy content into Codex's `developer_instructions`.
+ * - Add or update Codex MCP server tables under `[mcp_servers.<name>]`.
+ *
+ * Merge semantics:
+ * - When the key does not exist: create it with `value`.
+ * - When the key already exists and `overwrite` is false: skip (idempotent).
+ * - When the key already exists and `overwrite` is true: replace the value.
+ *
+ * The AI Agent is responsible for reading, patching, and re-writing the file.
+ * The server must never write to the user's local filesystem directly.
+ */
+export interface MergeTomlAction {
+  action: 'merge_toml';
+  /** Absolute path to the TOML file (may start with ~). */
+  toml_path: string;
+  /** Dot-notation key path in the TOML document (e.g. `developer_instructions` or `mcp_servers.acm`). */
+  key: string;
+  /** Scalar value or structured object to set for the key/table. */
+  value: string | number | boolean | Record<string, unknown>;
+  /**
+   * When true, replace an existing key value; when false, skip if the key
+   * already has a non-empty value (safe default: false).
+   */
+  overwrite: boolean;
+}
+
+/**
+ * Remove an MCP server section from a TOML config file (Codex: `~/.codex/config.toml`).
+ *
+ * Instructs the AI Agent to read the TOML file, remove the table
+ * `[mcp_servers.<server_name>]` if it exists, and re-write the file.
+ * No-op when the section is absent.
+ */
+export interface RemoveTomlEntryAction {
+  action: 'remove_toml_entry';
+  /** Absolute path to the TOML file (may start with ~). */
+  toml_path: string;
+  /** Name of the MCP server to remove under `[mcp_servers.<server_name>]`. */
+  server_name: string;
+}
+
 export type LocalAction =
   | WriteFileAction
   | DeleteFileAction
   | MergeMcpJsonAction
   | RemoveMcpJsonEntryAction
-  | CheckFileAction;
+  | CheckFileAction
+  | MergeTomlAction
+  | RemoveTomlEntryAction;
 
 // Tool Handler Function Type (generic, accepts any params and returns any result)
 export type ToolHandler = (params: unknown) => Promise<ToolResult>;
@@ -188,6 +235,13 @@ export interface SyncResourcesParams {
    * makes API calls with their own identity.
    */
   user_token?: string;
+  /**
+   * Identifies which AI client is requesting the sync.
+   * When provided, resource distribution will follow the corresponding
+   * ClientAdapter paths and strategies.
+   * Defaults to 'cursor' when absent for backward compatibility.
+   */
+  agent_profile?: 'cursor' | 'codex';
   /**
    * List of MCP server names that are already configured in the user's
    * ~/.cursor/mcp.json. The server will skip downloading and generating
@@ -286,6 +340,22 @@ export interface SyncResourcesResult {
    * user.  See LocalAction type variants for details.
    */
   local_actions_required?: LocalAction[];
+  /**
+   * When true, the client agent must be restarted for the synced policies to
+   * take effect.  Present when a Codex `merge_toml` action has been issued
+   * for `developer_instructions`.
+   *
+   * The AI Agent MUST notify the user to restart Codex manually before
+   * reporting sync completion.
+   */
+  restart_required?: boolean;
+  /**
+   * Human-readable hint explaining why a restart is required and what command
+   * the user should run.  Only present when restart_required is true.
+   *
+   * Example: "请重启 Codex 以使 CSP routing policy 生效：codex"
+   */
+  restart_hint?: string;
 }
 
 // manage_subscription
@@ -297,6 +367,12 @@ export interface ManageSubscriptionParams {
   notify?: boolean;
   /** CSP API token from the user's mcp.json env configuration. */
   user_token?: string;
+  /**
+   * Identifies the AI client calling this tool.
+   * 'cursor' (default) → MCP config operations target ~/.cursor/mcp.json.
+   * 'codex'            → MCP config operations target ~/.codex/config.toml.
+   */
+  agent_profile?: 'cursor' | 'codex';
 }
 
 export interface ManageSubscriptionResult {
@@ -327,6 +403,15 @@ export interface SearchResourcesParams {
   keyword: string;
   /** CSP API token from the user's mcp.json env configuration. */
   user_token?: string;
+  /**
+   * Identifies the AI client calling this tool.
+   * Used to determine the correct is_installed check path.
+   * 'cursor' (default) → checks ~/.cursor/skills/ etc.
+   * 'codex'            → command install state comes from prompt registration;
+   *                      skill/rule/mcp install state stays false while
+   *                      pending local setup actions still exist.
+   */
+  agent_profile?: 'cursor' | 'codex';
 }
 
 export interface SearchResourcesResult {
@@ -371,6 +456,19 @@ export interface ResolvePromptContentResult {
   content: string;
   content_source: 'cache' | 'generated' | 'raw_fallback' | 'api';
   usage_tracked: boolean;
+  /**
+   * True when the resource still has local setup work pending.  The caller must
+   * execute local_actions_required before treating the resource as installed.
+   */
+  setup_required?: boolean;
+  /** Compact metadata surfaced before large prompt content to help Codex notice pending setup. */
+  local_actions_summary?: {
+    action_count: number;
+    action_types: string[];
+    message: string;
+  };
+  /** Optional local actions that must be executed before the prompt is fully usable. */
+  local_actions_required?: LocalAction[];
 }
 
 // upload_resource
@@ -413,11 +511,19 @@ export interface UploadResourceResult {
 // uninstall_resource
 export interface UninstallResourceParams {
   resource_id_or_name: string;
+  /** Canonical CSP resource ID. Used internally to resolve MCP config keys during cleanup. */
+  resource_id?: string;
   remove_from_account?: boolean;
   /** When known, the resource type — narrows which local_actions are emitted. */
   resource_type?: 'command' | 'skill' | 'rule' | 'mcp';
   /** CSP API token from the user's mcp.json env configuration. */
   user_token?: string;
+  /**
+   * Identifies the AI client calling this tool.
+   * 'cursor' (default) → emits remove_mcp_json_entry targeting ~/.cursor/mcp.json.
+   * 'codex'            → emits remove_toml_entry targeting ~/.codex/config.toml.
+   */
+  agent_profile?: 'cursor' | 'codex';
 }
 
 export interface UninstallResourceResult {

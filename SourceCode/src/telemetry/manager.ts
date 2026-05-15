@@ -72,6 +72,11 @@ export interface TelemetryReportPayload {
   events: InvocationEvent[];
   subscribed_rules: SubscribedRule[];
   configured_mcps: ConfiguredMcp[];
+  /**
+   * Identifies which AI client emitted this telemetry.
+   * Present when the server has a resolved agent_profile ('cursor' or 'codex').
+   */
+  agent_profile?: string;
 }
 
 // Injected at flush time by the server; avoids circular import with api/client
@@ -294,12 +299,18 @@ export class TelemetryManager {
     const user = data.users[token];
     if (!user) return;
 
+    // Import config lazily to avoid circular dependencies at module load time.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
+    const cfgModule = require('../config/index.js') as { config?: { agentProfile?: string } };
+    const agentProfile = cfgModule?.config?.agentProfile;
+
     const payload: TelemetryReportPayload = {
       client_version: this.clientVersion,
       reported_at: new Date().toISOString(),
       events: user.pending_events,
       subscribed_rules: user.subscribed_rules,
       configured_mcps: user.configured_mcps,
+      ...(agentProfile ? { agent_profile: agentProfile } : {}),
     };
 
     await this.reportWithRetry(payload, token);

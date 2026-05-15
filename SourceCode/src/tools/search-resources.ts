@@ -3,6 +3,7 @@
  * Search for available resources
  */
 
+import { createHash } from 'crypto';
 import { logger, logToolCall } from '../utils/logger';
 import { apiClient } from '../api/client';
 import { filesystemManager } from '../filesystem/manager';
@@ -10,6 +11,9 @@ import { getCursorResourcePath } from '../utils/cursor-paths.js';
 import { MCPServerError } from '../types/errors';
 import type { SearchResourcesParams, SearchResourcesResult, ToolResult } from '../types/tools';
 import { SearchCoordinator } from '../search';
+import { promptManager } from '../prompts/index.js';
+import { config } from '../config/index.js';
+import type { AgentProfile } from '../client-adapters/index.js';
 
 // Search coordinator singleton
 const searchCoordinator = new SearchCoordinator();
@@ -22,10 +26,14 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
  * Generate cache key from search parameters
  */
 function getCacheKey(params: SearchResourcesParams): string {
+  const userToken = params.user_token ?? '';
   return JSON.stringify({
     team: params.team || '',
     type: params.type || '',
     keyword: params.keyword || '',
+    agent_profile: params.agent_profile || config.agentProfile || 'cursor',
+    user: userToken ? createHash('sha256').update(userToken).digest('hex').slice(0, 16) : '',
+    subscription_state_version: promptManager.getSubscriptionStateVersion(userToken),
   });
 }
 
@@ -115,21 +123,85 @@ export async function searchResources(params: unknown): Promise<ToolResult<Searc
       'Search enhancement applied'
     );
 
+    // Build a local subscription set from registered prompts for the current user.
+    // The server-side is_subscribed flag may be stale (token mismatch, cache, etc.)
+    // so we override it with the authoritative local promptManager state.
+    const userToken = typedParams.user_token ?? '';
+    const localSubscribedNames = new Set<string>(
+      promptManager.promptNames(userToken).map((promptName) => {
+        // Prompt names are "<type>/<resource_name>" where resource_name is already
+        // lowercased with spaces replaced by '-' (see buildPromptName).
+        // Extract just the resource_name portion for comparison against search results.
+        const slashIdx = promptName.indexOf('/');
+        return slashIdx >= 0 ? promptName.slice(slashIdx + 1) : promptName;
+      }),
+    );
+
+    // Normalize API resource names the same way buildPromptName does so the
+    // comparison is case/whitespace insensitive.
+    const normalizeResourceName = (name: string) => name.toLowerCase().replace(/\s+/g, '-');
+
+    // Resolve agent profile for is_installed check strategy.
+    const resolvedSearchProfile: AgentProfile =
+      (typedParams.agent_profile as AgentProfile | undefined) ?? config.agentProfile ?? 'cursor';
+
     // Check subscription and installation status for each result
     const finalResults = await Promise.all(
       enhancedResults.map(async (resource) => {
-        // Check if installed locally in the Cursor directory for this resource type
+        const normalizedName = normalizeResourceName(resource.name);
+        const locallySubscribed = localSubscribedNames.has(normalizedName);
+        const locallySuppressed = promptManager.isSubscriptionSuppressed(userToken, resource.id);
+        const isSubscribed = locallySuppressed
+          ? locallySubscribed
+          : locallySubscribed || Boolean(resource.is_subscribed);
+
+        // Check if installed locally.
+        //
+        // Cursor: check the local filesystem path (server-side filesystem matches
+        //   the user's machine when running as a local stdio MCP).
+        //
+        // Codex: commands are prompt-only, but skills/rules/MCP installs may
+        //   still have pending local_actions_required that were cached for the
+        //   setup prompt and not yet consumed. Treat those resources as NOT
+        //   installed until pending setup is cleared; otherwise use the best
+        //   available subscription/prompt signal.
         let isInstalled = false;
-        try {
-          const resourcePath = getCursorResourcePath(resource.type, resource.name);
-          isInstalled = await filesystemManager.fileExists(resourcePath);
-        } catch {
-          // Unknown type or path check failed — treat as not installed
-          isInstalled = false;
+        if (resolvedSearchProfile === 'codex') {
+          const hasPendingSetup = promptManager.hasPendingSyncActionsForResource(userToken, resource.name);
+          if (resource.type === 'command') {
+            isInstalled = isSubscribed;
+          } else {
+            isInstalled = isSubscribed && !hasPendingSetup;
+          }
+        } else {
+          try {
+            const resourcePath = getCursorResourcePath(resource.type, resource.name);
+            isInstalled = await filesystemManager.fileExists(resourcePath);
+          } catch {
+            // Unknown type or path check failed — treat as not installed
+            isInstalled = false;
+          }
+        }
+
+        // Override is_subscribed with the local promptManager state.
+        // Local state is authoritative: if the prompt is registered in-memory,
+        // the resource is definitely subscribed regardless of the API response.
+        if (locallySubscribed && !resource.is_subscribed) {
+          logger.debug(
+            { resourceName: resource.name, normalizedName, apiIsSubscribed: resource.is_subscribed },
+            'search_resources: overriding is_subscribed=false from API with local promptManager state (true)',
+          );
+        }
+        if (locallySuppressed && resource.is_subscribed && !locallySubscribed) {
+          logger.debug(
+            { resourceName: resource.name, resourceId: resource.id },
+            'search_resources: overriding is_subscribed=true from API with local unsubscribe suppression (false)',
+          );
         }
 
         return {
           ...resource,
+          is_subscribed: isSubscribed,
           is_installed: isInstalled,
         };
       })
@@ -194,6 +266,14 @@ export const searchResourcesTool = {
       keyword: {
         type: 'string',
         description: 'Search keyword (searches in name, description, tags)',
+      },
+      agent_profile: {
+        type: 'string',
+        description:
+          'AI client profile: "cursor" (default) or "codex". ' +
+          'Affects is_installed detection strategy: Cursor checks local filesystem paths; ' +
+          'Codex uses prompt-registry membership (remote MCP cannot access user filesystem).',
+        enum: ['cursor', 'codex'],
       },
       user_token: {
         type: 'string',

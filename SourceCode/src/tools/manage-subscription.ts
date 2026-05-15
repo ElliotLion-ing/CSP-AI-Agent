@@ -11,6 +11,8 @@ import { syncResources } from './sync-resources';
 import { uninstallResource } from './uninstall-resource';
 import { promptManager } from '../prompts/index.js';
 import { getCspAgentDirForClient } from '../utils/cursor-paths.js';
+import { adapterRegistry, type AgentProfile } from '../client-adapters/index.js';
+import { config } from '../config/index.js';
 
 export async function manageSubscription(params: unknown): Promise<ToolResult<ManageSubscriptionResult>> {
   const startTime = Date.now();
@@ -43,6 +45,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           undefined,
           typedParams.user_token
         );
+        promptManager.clearSuppressedSubscriptions(typedParams.user_token ?? '', typedParams.resource_ids);
 
         logger.info({ count: subResult.subscriptions.length }, 'Resources subscribed successfully');
 
@@ -51,17 +54,30 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         let syncSummary: string | undefined;
         let syncDetails: Array<{ id: string; name: string; action: string }> | undefined;
         let pendingSetup: unknown[] | undefined;
+        let subscribeLocalActions: import('../types/tools.js').LocalAction[] | undefined;
 
-        if (shouldAutoSync && subResult.subscriptions.length > 0) {
-          logger.info({ resourceIds: typedParams.resource_ids }, 'Auto-syncing newly subscribed resources...');
+        const resourceIdsForAutoSync = Array.from(new Set(typedParams.resource_ids));
+        if (shouldAutoSync && resourceIdsForAutoSync.length > 0) {
+          logger.info(
+            {
+              resourceIds: resourceIdsForAutoSync,
+              newlyCreatedSubscriptionCount: subResult.subscriptions.length,
+            },
+            'Auto-syncing requested subscribed resources...',
+          );
           // Scope auto-sync to only the newly subscribed resource(s).
           // Passing resource_ids prevents processing all other subscribed resources,
           // which would generate unnecessary local_actions and waste context window.
+          // Important: sync the requested ids even when the subscribe API returns
+          // zero newly-created rows.  Default/baseline resources can be locally
+          // suppressed and then restored without creating a server-side row; they
+          // still need prompt registration and local actions rebuilt immediately.
           const syncResult = await syncResources({
             mode: 'incremental',
             scope: typedParams.scope || 'global',
             user_token: typedParams.user_token,
-            resource_ids: typedParams.resource_ids,
+            resource_ids: resourceIdsForAutoSync,
+            agent_profile: typedParams.agent_profile,
           });
           if (syncResult.success && syncResult.data) {
             const sd = syncResult.data;
@@ -69,6 +85,9 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             syncDetails = sd.details.map(d => ({ id: d.id, name: d.name, action: d.action }));
             if (sd.pending_setup && sd.pending_setup.length > 0) {
               pendingSetup = sd.pending_setup;
+            }
+            if (sd.local_actions_required && sd.local_actions_required.length > 0) {
+              subscribeLocalActions = sd.local_actions_required;
             }
             logger.info({ summary: sd.summary }, 'Auto-sync after subscribe completed');
           } else {
@@ -79,9 +98,9 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
 
         // Build per-resource sync hint so the AI knows to use resource_ids
         // for a scoped incremental sync instead of syncing all resources.
-        const subscribedIds = subResult.subscriptions.map(s => s.id);
+        const subscribedIds = resourceIdsForAutoSync;
         const syncHint = subscribedIds.length > 0
-          ? `To sync ONLY the newly subscribed resource(s), call: sync_resources(mode="incremental", resource_ids=${JSON.stringify(subscribedIds)}). This avoids returning local_actions for ALL subscribed resources and drastically reduces context overhead.`
+          ? `To sync ONLY the requested resource(s), call: sync_resources(mode="incremental", resource_ids=${JSON.stringify(subscribedIds)}). This avoids returning local_actions for ALL subscribed resources and drastically reduces context overhead.`
           : undefined;
 
         result = {
@@ -94,13 +113,21 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             subscribed_at: sub.subscribed_at,
           })),
           message: [
-            `Successfully subscribed to ${subResult.subscriptions.length} resource${subResult.subscriptions.length > 1 ? 's' : ''}.`,
+            `Successfully processed subscribe request for ${resourceIdsForAutoSync.length} resource id${resourceIdsForAutoSync.length > 1 ? 's' : ''}.`,
+            `Server created ${subResult.subscriptions.length} new subscription${subResult.subscriptions.length !== 1 ? 's' : ''}.`,
+            subResult.subscriptions.length === 0 && shouldAutoSync
+              ? 'Requested resource(s) may already be subscribed or provided by baseline defaults; scoped auto-sync was still executed.'
+              : null,
             syncSummary,
             syncHint,
+            subscribeLocalActions && subscribeLocalActions.length > 0
+              ? `IMPORTANT: ${subscribeLocalActions.length} local action(s) are still pending. Execute local_actions_required or fetch csp-ai-agent-setup before treating the resource as installed.`
+              : null,
             'If you need to execute a newly subscribed Command or Skill in this same conversation, call resolve_prompt_content next to retrieve the real prompt body.',
           ].filter(Boolean).join(' '),
           ...(syncDetails ? { sync_details: syncDetails } : {}),
           ...(pendingSetup ? { pending_setup: pendingSetup } : {}),
+          ...(subscribeLocalActions ? { local_actions_required: subscribeLocalActions } : {}),
         };
         break;
       }
@@ -114,6 +141,14 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             'resource_ids is required for unsubscribe action'
           );
         }
+
+        // Resolve the client adapter: prefer caller-supplied agent_profile, fall
+        // back to server-wide config (set via CSP_AGENT_PROFILE env var).
+        // This mirrors the same resolution logic in sync-resources.ts so that
+        // Codex unsubscribes emit remove_toml_entry instead of remove_mcp_json_entry.
+        const resolvedUnsubProfile: AgentProfile =
+          (typedParams.agent_profile as AgentProfile | undefined) ?? config.agentProfile ?? 'cursor';
+        const unsubClientAdapter = adapterRegistry.get(resolvedUnsubProfile);
 
         logger.debug({ resourceIds: typedParams.resource_ids }, 'Unsubscribing from resources...');
 
@@ -135,9 +170,27 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           logger.warn({ error: (e as Error).message }, 'Could not fetch subscriptions for type resolution — uninstall will emit both rule+mcp actions as fallback');
         }
 
-        // Cancel server-side subscription
-        await apiClient.unsubscribe(typedParams.resource_ids, typedParams.user_token);
-        logger.info({ count: typedParams.resource_ids.length }, 'Server-side subscriptions removed');
+        // Cancel server-side subscription.  Baseline/default subscriptions may
+        // be exposed by list/search but have no removable user row on the
+        // server; in that case the API returns removed_count=0.  Do not abort
+        // local cleanup here: apply a local suppression after verification so
+        // prompts/list/search/sync are consistent for this user.
+        const unsubscribeResponse = await apiClient.unsubscribe(typedParams.resource_ids, typedParams.user_token);
+        const serverRemovedAll = unsubscribeResponse.removed_count === typedParams.resource_ids.length;
+        if (!serverRemovedAll) {
+          logger.warn(
+            {
+              requested: unsubscribeResponse.requested_count,
+              removed: unsubscribeResponse.removed_count,
+              resourceIds: typedParams.resource_ids,
+            },
+            'Unsubscribe API reported partial removal; continuing local cleanup and will verify list state',
+          );
+        }
+        logger.info(
+          { requested: unsubscribeResponse.requested_count, removed: unsubscribeResponse.removed_count },
+          'Server-side subscriptions removed',
+        );
 
         // Uninstall local files and MCP config for each resource.
         // For Command/Skill: unregister MCP Prompt instead of deleting local files.
@@ -168,7 +221,9 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             // find no matching prompts and skip the skill cleanup branch entirely.
             // Instead, we directly build the delete_file local_actions for the AI to execute.
             if (resourceType === 'skill') {
-              const skillDir = `${getCspAgentDirForClient('skills')}/${resourceName}`;
+              // Use adapter-resolved path so Codex cleans ~/.csp-ai-agent/codex/skills/<name>/
+              // instead of the Cursor-only ~/.csp-ai-agent/skills/<name>/.
+              const skillDir = unsubClientAdapter.getSkillDir(resourceName);
               const manifestFile = `${getCspAgentDirForClient('.manifests')}/${resourceName}.md`;
 
               unsubscribeLocalActions.push(
@@ -212,8 +267,15 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           for (const pattern of patternsToTry) {
             const uninstallResult = await uninstallResource({
               resource_id_or_name: pattern,
+              resource_id: resourceId,
               remove_from_account: false, // already unsubscribed above
+              user_token: typedParams.user_token,
               ...(resolvedType ? { resource_type: resolvedType } : {}),
+              // Always forward the resolved agent_profile so uninstall_resource emits
+              // the correct config action:
+              //   Cursor → remove_mcp_json_entry targeting ~/.cursor/mcp.json
+              //   Codex  → remove_toml_entry targeting ~/.codex/config.toml
+              agent_profile: resolvedUnsubProfile,
             });
             if (uninstallResult.success && uninstallResult.data && uninstallResult.data.removed_resources.length > 0) {
               // Collect local_actions_required (e.g. remove_mcp_json_entry for mcp-type resources,
@@ -240,6 +302,53 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         const removedCount = uninstallResults.filter(r => r.removed).length;
         const notFoundCount = uninstallResults.filter(r => !r.removed).length;
 
+        // Verify server-side unsubscription with retry (up to 3 attempts, 300 ms apart).
+        // The API may have a short propagation delay before list reflects the removal.
+        const removedIds = new Set(typedParams.resource_ids);
+        let verifiedRemoval = false;
+        let stillPresentIds: string[] = [];
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (attempt > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 300));
+          }
+          try {
+            const verifySubs = await apiClient.getSubscriptions({}, typedParams.user_token);
+            const stillPresent = verifySubs.subscriptions.filter((s) => removedIds.has(s.id));
+            stillPresentIds = stillPresent.map((s) => s.id);
+            if (stillPresent.length === 0) {
+              verifiedRemoval = true;
+              break;
+            }
+            logger.info(
+              { attempt, stillPresent: stillPresent.map((s) => s.id) },
+              'manage_subscription unsubscribe: server list still contains removed IDs, retrying verification',
+            );
+          } catch (verifyErr) {
+            logger.warn(
+              { attempt, error: (verifyErr as Error).message },
+              'manage_subscription unsubscribe: verification list call failed, skipping retry',
+            );
+            break;
+          }
+        }
+
+        const localSuppressionApplied = stillPresentIds.length > 0;
+        if (localSuppressionApplied) {
+          promptManager.suppressSubscriptions(typedParams.user_token ?? '', stillPresentIds);
+          verifiedRemoval = true;
+          logger.info(
+            { stillPresentIds },
+            'manage_subscription unsubscribe: applied local suppression for server-visible default subscriptions',
+          );
+        }
+
+        if (!verifiedRemoval) {
+          logger.warn(
+            { resourceIds: typedParams.resource_ids },
+            'manage_subscription unsubscribe: server list still shows resources after 3 verification attempts and no local suppression was applied',
+          );
+        }
+
         result = {
           action: 'unsubscribe',
           success: true,
@@ -248,14 +357,20 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             removedCount > 0 ? `Removed local files for ${removedCount} resource${removedCount > 1 ? 's' : ''}.` : null,
             notFoundCount > 0 ? `${notFoundCount} resource${notFoundCount > 1 ? 's were' : ' was'} not installed locally.` : null,
             unsubscribeLocalActions.length > 0
-              ? `Execute ${unsubscribeLocalActions.length} action(s) in local_actions_required to delete local skill files and manifests.`
+              ? `IMPORTANT: You MUST execute ALL ${unsubscribeLocalActions.length} action(s) in local_actions_required immediately to delete local skill files and manifests. Do not skip any delete_file action.`
+              : null,
+            localSuppressionApplied
+              ? `NOTE: ${stillPresentIds.length} default/baseline subscription${stillPresentIds.length > 1 ? 's were' : ' was'} still returned by the server, so a local unsubscribe override was applied for this MCP session.`
+              : null,
+            !verifiedRemoval
+              ? `WARNING: The server subscription list may still show these resources due to propagation delay. If manage_subscription(list) still returns them, wait 1-2 seconds and retry.`
               : null,
           ].filter(Boolean).join(' '),
           sync_details: uninstallResults.map(r => ({ id: r.id, name: r.id, action: r.removed ? 'uninstalled' : 'not_found_locally' })),
           ...(unsubscribeLocalActions.length > 0 ? { local_actions_required: unsubscribeLocalActions } : {}),
         };
 
-        logger.info({ count: typedParams.resource_ids.length, removedCount }, 'Resources unsubscribed and local files cleaned up');
+        logger.info({ count: typedParams.resource_ids.length, removedCount, verifiedRemoval }, 'Resources unsubscribed and local files cleaned up');
         break;
       }
 
@@ -264,20 +379,28 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
 
         // Get subscriptions list
         const subs = await apiClient.getSubscriptions({}, typedParams.user_token);
+        const visibleSubscriptions = promptManager.filterSuppressedSubscriptions(
+          typedParams.user_token ?? '',
+          subs.subscriptions,
+        );
+        const hiddenCount = subs.subscriptions.length - visibleSubscriptions.length;
 
         result = {
           action: 'list',
           success: true,
-          subscriptions: subs.subscriptions.map(sub => ({
+          subscriptions: visibleSubscriptions.map(sub => ({
             id: sub.id,
             name: sub.name,
             type: sub.type,
             subscribed_at: sub.subscribed_at,
           })),
-          message: `Found ${subs.total} subscription${subs.total !== 1 ? 's' : ''}`,
+          message: [
+            `Found ${visibleSubscriptions.length} subscription${visibleSubscriptions.length !== 1 ? 's' : ''}`,
+            hiddenCount > 0 ? `(${hiddenCount} locally unsubscribed default subscription${hiddenCount > 1 ? 's are' : ' is'} hidden)` : null,
+          ].filter(Boolean).join(' '),
         };
 
-        logger.info({ total: subs.total }, 'Subscriptions listed successfully');
+        logger.info({ total: visibleSubscriptions.length, hiddenCount }, 'Subscriptions listed successfully');
         break;
       }
 
@@ -299,6 +422,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           undefined,
           typedParams.user_token
         );
+        promptManager.clearSuppressedSubscriptions(typedParams.user_token ?? '', typedParams.resource_ids);
 
         logger.info({ count: batchSubResult.subscriptions.length }, 'Batch subscription completed');
 
@@ -307,13 +431,23 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         let batchSyncSummary: string | undefined;
         let batchSyncDetails: Array<{ id: string; name: string; action: string }> | undefined;
         let batchPendingSetup: unknown[] | undefined;
+        let batchLocalActions: import('../types/tools.js').LocalAction[] | undefined;
 
-        if (shouldBatchAutoSync && batchSubResult.subscriptions.length > 0) {
-          logger.info({ count: batchSubResult.subscriptions.length }, 'Auto-syncing batch subscribed resources...');
+        const batchResourceIdsForAutoSync = Array.from(new Set(typedParams.resource_ids));
+        if (shouldBatchAutoSync && batchResourceIdsForAutoSync.length > 0) {
+          logger.info(
+            {
+              requestedCount: batchResourceIdsForAutoSync.length,
+              newlyCreatedSubscriptionCount: batchSubResult.subscriptions.length,
+            },
+            'Auto-syncing requested batch subscribed resources...',
+          );
           const batchSyncResult = await syncResources({
             mode: 'incremental',
             scope: typedParams.scope || 'global',
             user_token: typedParams.user_token,
+            resource_ids: batchResourceIdsForAutoSync,
+            agent_profile: typedParams.agent_profile,
           });
           if (batchSyncResult.success && batchSyncResult.data) {
             const sd = batchSyncResult.data;
@@ -321,6 +455,9 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             batchSyncDetails = sd.details.map(d => ({ id: d.id, name: d.name, action: d.action }));
             if (sd.pending_setup && sd.pending_setup.length > 0) {
               batchPendingSetup = sd.pending_setup;
+            }
+            if (sd.local_actions_required && sd.local_actions_required.length > 0) {
+              batchLocalActions = sd.local_actions_required;
             }
           } else {
             batchSyncSummary = 'Auto-sync failed — run sync_resources manually if needed';
@@ -337,11 +474,19 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             subscribed_at: sub.subscribed_at,
           })),
           message: [
-            `Successfully batch subscribed to ${batchSubResult.subscriptions.length} resource${batchSubResult.subscriptions.length > 1 ? 's' : ''}.`,
+            `Successfully processed batch subscribe request for ${batchResourceIdsForAutoSync.length} resource id${batchResourceIdsForAutoSync.length > 1 ? 's' : ''}.`,
+            `Server created ${batchSubResult.subscriptions.length} new subscription${batchSubResult.subscriptions.length !== 1 ? 's' : ''}.`,
+            batchSubResult.subscriptions.length === 0 && shouldBatchAutoSync
+              ? 'Requested resource(s) may already be subscribed or provided by baseline defaults; scoped auto-sync was still executed.'
+              : null,
             batchSyncSummary,
+            batchLocalActions && batchLocalActions.length > 0
+              ? `IMPORTANT: ${batchLocalActions.length} local action(s) are still pending. Execute local_actions_required or fetch csp-ai-agent-setup before treating these resources as installed.`
+              : null,
           ].filter(Boolean).join(' '),
           ...(batchSyncDetails ? { sync_details: batchSyncDetails } : {}),
           ...(batchPendingSetup ? { pending_setup: batchPendingSetup } : {}),
+          ...(batchLocalActions ? { local_actions_required: batchLocalActions } : {}),
         };
         break;
       }

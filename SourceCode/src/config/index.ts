@@ -6,6 +6,7 @@
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 import * as fs from 'fs';
+import type { AgentProfile } from '../client-adapters/index.js';
 
 // Load .env file if exists
 // Try multiple paths to find .env file
@@ -39,10 +40,23 @@ export interface Config {
 
   // Transport
   transport: {
-    mode: 'stdio' | 'sse';
+    /**
+     * 'stdio'           — local stdio (Cursor local MCP)
+     * 'sse'             — legacy SSE only (Cursor remote MCP)
+     * 'streamable_http' — Streamable HTTP only (Codex CLI)
+     * 'dual'            — SSE + Streamable HTTP simultaneously (both clients)
+     */
+    mode: 'stdio' | 'sse' | 'streamable_http' | 'dual';
   };
 
-  // HTTP Server (for SSE transport)
+  /**
+   * Identifies which AI client this server instance is serving.
+   * Set via the CSP_AGENT_PROFILE environment variable.
+   * Defaults to 'cursor' for backward compatibility.
+   */
+  agentProfile: AgentProfile;
+
+  // HTTP Server (for SSE transport and dual mode)
   http?: {
     host: string;
     port: number;
@@ -64,6 +78,15 @@ export interface Config {
      * http://host:port when running locally (where 0.0.0.0 == localhost).
      */
     publicOrigin: string;
+  };
+
+  // Streamable HTTP Server (for streamable_http transport and dual mode)
+  // Uses separate env vars (STREAMABLE_HTTP_HOST/PORT) to avoid port conflicts
+  // when running alongside the SSE server in dual mode.
+  streamableHttp?: {
+    host: string;
+    port: number;
+    basePath: string;
   };
 
   // Session (for SSE transport)
@@ -159,18 +182,23 @@ function getEnvBoolean(key: string, defaultValue: boolean): boolean {
 export function loadConfig(): Config {
   const nodeEnv = (process.env.NODE_ENV || 'development') as Config['nodeEnv'];
   const logLevel = (process.env.LOG_LEVEL || 'info') as Config['logLevel'];
-  const transportMode = (process.env.TRANSPORT_MODE || 'stdio') as 'stdio' | 'sse';
+  const transportMode = (process.env.TRANSPORT_MODE || 'stdio') as Config['transport']['mode'];
+  // In dual mode the server serves both Cursor (SSE) and Codex (Streamable HTTP),
+  // so agentProfile defaults to 'cursor' for backward-compatible SSE behaviour;
+  // the Streamable HTTP path sets it per-request via the adapter registry.
+  const agentProfile = (process.env.CSP_AGENT_PROFILE === 'codex' ? 'codex' : 'cursor') as AgentProfile;
 
   return {
     nodeEnv,
     port: getEnvNumber('PORT', 5090),
     logLevel,
+    agentProfile,
 
     transport: {
       mode: transportMode,
     },
 
-    http: transportMode === 'sse' ? (() => {
+    http: (transportMode === 'sse' || transportMode === 'dual') ? (() => {
       const host     = getEnv('HTTP_HOST', '0.0.0.0');
       const port     = getEnvNumber('HTTP_PORT', 3000);
       const basePath = getEnv('HTTP_BASE_PATH', '');
@@ -199,7 +227,13 @@ export function loadConfig(): Config {
       return { host, port, basePath, publicOrigin };
     })() : undefined,
 
-    session: transportMode === 'sse' ? {
+    streamableHttp: (transportMode === 'streamable_http' || transportMode === 'dual') ? {
+      host:     getEnv('STREAMABLE_HTTP_HOST', '0.0.0.0'),
+      port:     getEnvNumber('STREAMABLE_HTTP_PORT', 3001),
+      basePath: getEnv('HTTP_BASE_PATH', ''),  // share the same base path prefix
+    } : undefined,
+
+    session: (transportMode === 'sse' || transportMode === 'dual') ? {
       timeout: getEnvNumber('SESSION_TIMEOUT', 3600),
     } : undefined,
 

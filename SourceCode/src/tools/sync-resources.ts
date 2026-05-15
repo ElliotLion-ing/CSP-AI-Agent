@@ -25,7 +25,6 @@ import {
   getCursorResourcePath,
   getCursorTypeDirForClient,
   getCursorRootDirForClient,
-  getCspAgentDirForClient,
   getCspAgentRootDirForClient,
 } from '../utils/cursor-paths';
 import { MCPServerError } from '../types/errors';
@@ -38,6 +37,9 @@ import type {
 import { telemetry } from '../telemetry/index.js';
 import { promptManager } from '../prompts/index.js';
 import { expandMdReferences } from '../utils/md-reference-expander.js';
+import { adapterRegistry, type AgentProfile } from '../client-adapters/index.js';
+import { generatePolicyContent } from './policy-generator.js';
+import { config } from '../config/index.js';
 
 /**
  * Server-side in-memory download cache.
@@ -147,6 +149,48 @@ function encodeForRender(
   };
 }
 
+function codexMcpUrl(url: string): string {
+  // Codex consumes Streamable HTTP MCP endpoints. Server-side MCP resource
+  // packages may still ship Cursor/SSE URLs for backward compatibility.
+  return url.replace(/\/sse\/?$/, '/mcp');
+}
+
+function toCodexMcpTomlEntry(entry: Record<string, unknown>): Record<string, unknown> {
+  const converted: Record<string, unknown> = { ...entry };
+
+  if (typeof converted.url === 'string') {
+    converted.url = codexMcpUrl(converted.url);
+  }
+
+  if (converted.headers && !converted.http_headers) {
+    converted.http_headers = converted.headers;
+    delete converted.headers;
+  }
+
+  // Codex infers HTTP MCP transport from `url`; keeping Cursor's `sse`
+  // transport marker in config.toml makes the generated config misleading.
+  if (converted.transport === 'sse' || converted.transport === 'streamable_http' || converted.transport === 'streamable-http') {
+    delete converted.transport;
+  }
+
+  return converted;
+}
+
+function queueCodexMcpTomlAction(
+  localActions: LocalAction[],
+  tomlPath: string,
+  serverName: string,
+  entry: Record<string, unknown>,
+): void {
+  localActions.push({
+    action: 'merge_toml',
+    toml_path: tomlPath,
+    key: `mcp_servers.${serverName}`,
+    value: toCodexMcpTomlEntry(entry),
+    overwrite: false,
+  });
+}
+
 /**
  * Same as encodeForRender, but produces the field shape required by
  * CheckFileAction (`expected_content` + a sibling encoding hint stored as
@@ -189,6 +233,16 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
       ? new Set(typedParams.resource_ids)
       : null;
     const confirmedFullSync = typedParams._confirmed_full_sync === true;
+
+    // Resolve client adapter: prefer the caller-supplied agent_profile, fall
+    // back to the server-wide config.agentProfile (set via CSP_AGENT_PROFILE).
+    const resolvedProfile: AgentProfile =
+      (typedParams.agent_profile as AgentProfile | undefined) ?? config.agentProfile ?? 'cursor';
+    const clientAdapter = adapterRegistry.get(resolvedProfile);
+
+    // Collect per-rule content for Codex policy aggregation (stage 4).
+    // Each entry is raw rule markdown to be merged into csp-routing-policy.md.
+    const codexRuleContents: Array<{ name: string; content: string }> = [];
 
     logToolStep('sync_resources', 'Parameters validated', { 
       mode, 
@@ -235,6 +289,11 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
     const t1 = Date.now();
 
     const allSubscriptions = await apiClient.getSubscriptions({ types }, userToken);
+    const visibleAllSubscriptions = {
+      ...allSubscriptions,
+      subscriptions: promptManager.filterSuppressedSubscriptions(userToken ?? '', allSubscriptions.subscriptions),
+    };
+    visibleAllSubscriptions.total = visibleAllSubscriptions.subscriptions.length;
 
     // Apply resource_ids filter if provided — only process the specified resources.
     // This is done client-side: the subscription list API has no resource_ids filter,
@@ -242,10 +301,10 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
     // processing is efficient regardless.
     const subscriptions = resourceIds
       ? {
-          total: allSubscriptions.subscriptions.filter(s => resourceIds.has(s.id)).length,
-          subscriptions: allSubscriptions.subscriptions.filter(s => resourceIds.has(s.id)),
+          total: visibleAllSubscriptions.subscriptions.filter(s => resourceIds.has(s.id)).length,
+          subscriptions: visibleAllSubscriptions.subscriptions.filter(s => resourceIds.has(s.id)),
         }
-      : allSubscriptions;
+      : visibleAllSubscriptions;
 
     logToolStep('sync_resources', 'Subscriptions fetched', {
       totalFromApi: allSubscriptions.total,
@@ -360,7 +419,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                     });
                     
                     // Check each script file in .csp-ai-agent
-                    const skillDir = `${getCspAgentDirForClient('skills')}/${sub.name}`;
+                    const skillDir = clientAdapter.getSkillDir(sub.name);
                     for (const scriptFile of metadata.script_files) {
                       localActions.push({
                         action: 'check_file',
@@ -621,10 +680,14 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                   source: 'API',
                 });
 
-                // Use isolated directory for complex skills (not ~/.cursor/skills/)
-                // SKILL.md is NOT downloaded — only scripts are cached locally
-                // This prevents Cursor from auto-discovering the skill while enabling script execution
-                const skillDir = `${getCspAgentDirForClient('skills')}/${sub.name}`;
+                // Use client-adapter-resolved directory so Cursor and Codex each get
+                // their own isolated subtree:
+                //   Cursor → ~/.csp-ai-agent/skills/<name>/
+                //   Codex  → ~/.csp-ai-agent/codex/skills/<name>/
+                // SKILL.md is NOT downloaded — only scripts are cached locally.
+                // This prevents the client from auto-discovering the skill while
+                // enabling script execution.
+                const skillDir = clientAdapter.getSkillDir(sub.name);
                 
                 // Generate write_file actions for script files ONLY (exclude SKILL.md)
                 // First script file carries is_skill_manifest marker for atomic update check
@@ -638,7 +701,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                     action: 'write_file',
                     path: `${skillDir}/${firstScript.path}`,
                     ...encodeForRender(firstScript.path, firstScript.content),
-                    mode: firstScript.path.includes('/scripts/') ? '0755' : undefined,
+                    mode: firstScript.path.includes('scripts/') ? '0755' : undefined,
                     // Atomic update marker: client checks manifest FIRST
                     is_skill_manifest: true,
                     // SKILL.md content for version comparison (stored separately in .manifests/)
@@ -655,7 +718,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                     action: 'write_file',
                     path: `${skillDir}/${scriptFile.path}`,
                     ...encodeForRender(scriptFile.path, scriptFile.content),
-                    mode: scriptFile.path.includes('/scripts/') ? '0755' : undefined,
+                    mode: scriptFile.path.includes('scripts/') ? '0755' : undefined,
                   });
                 }
                 
@@ -679,7 +742,8 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                     source: 'Git',
                   });
 
-                  const skillDir = `${getCspAgentDirForClient('skills')}/${sub.name}`;
+                  // Use client-adapter-resolved directory (Cursor vs Codex subtree).
+                  const skillDir = clientAdapter.getSkillDir(sub.name);
                   
                   if (metadata.script_files.length > 0) {
                     const firstScript = metadata.script_files[0];
@@ -690,7 +754,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                         action: 'write_file',
                         path: `${skillDir}/${firstScript.relative_path}`,
                         ...encodeForRender(firstScript.relative_path, firstScript.content, firstScript.encoding),
-                        mode: firstScript.mode,
+                        mode: firstScript.mode ?? (firstScript.relative_path.includes('scripts/') ? '0755' : undefined),
                         is_skill_manifest: true,
                         skill_manifest_content: Buffer.from(rawContent, "utf8").toString("base64"),
                       });
@@ -704,7 +768,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                         action: 'write_file',
                         path: `${skillDir}/${scriptFile.relative_path}`,
                         ...encodeForRender(scriptFile.relative_path, scriptFile.content, scriptFile.encoding),
-                        mode: scriptFile.mode,
+                        mode: scriptFile.mode ?? (scriptFile.relative_path.includes('scripts/') ? '0755' : undefined),
                       });
                     }
                   }
@@ -848,8 +912,10 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
           const mcpConfigFile = resourceFiles.find(
             (f) => path.basename(f.path) === 'mcp-config.json',
           );
-          // ~/.cursor/mcp.json on the user's machine
-          const mcpJsonPath = `${getCursorRootDirForClient()}/mcp.json`;
+          // Config path differs per client: mcp.json (Cursor) vs config.toml (Codex)
+          const mcpJsonPath = resolvedProfile === 'codex'
+            ? clientAdapter.getMcpConfigPath()  // ~/.codex/config.toml
+            : `${getCursorRootDirForClient()}/mcp.json`;
 
           // ── Optimization: skip if already configured (incremental mode only) ────
           // In incremental mode, if the AI Agent reports this MCP server is already
@@ -910,7 +976,39 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
               );
             }
 
-            if (typeof cfg['command'] === 'string') {
+            if (resolvedProfile === 'codex') {
+              // ── Codex MCP: inject server entry into config.toml via merge_toml ──
+              // The Codex CLI reads MCP server configuration from ~/.codex/config.toml.
+              // Format A becomes [mcp_servers.<name>]. Format B emits one
+              // table per remote server entry. URL entries are normalised from
+              // Cursor/SSE (`/sse`) to Codex Streamable HTTP (`/mcp`).
+              const tomlPath = clientAdapter.getMcpConfigPath();
+              const queuedServers: string[] = [];
+
+              if (typeof cfg['command'] === 'string') {
+                const serverName = (cfg['name'] as string | undefined) ?? sub.name;
+                queueCodexMcpTomlAction(localActions, tomlPath, serverName, cfg);
+                queuedServers.push(serverName);
+              } else {
+                for (const [serverName, entry] of Object.entries(cfg)) {
+                  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+                    logger.warn(
+                      { resourceId: sub.id, resourceName: sub.name, serverName },
+                      'sync_resources: skipping invalid Codex MCP config entry',
+                    );
+                    continue;
+                  }
+                  queueCodexMcpTomlAction(localActions, tomlPath, serverName, entry as Record<string, unknown>);
+                  queuedServers.push(serverName);
+                }
+              }
+
+              logger.info(
+                { resourceId: sub.id, resourceName: sub.name, serverKeys: queuedServers, tomlPath, profile: 'codex' },
+                'sync_resources: Codex MCP — merge_toml action queued',
+              );
+              logToolStep('sync_resources', 'Codex MCP: merge_toml queued', { resourceId: sub.id, serverKeys: queuedServers });
+            } else if (typeof cfg['command'] === 'string') {
               // ── Format A: local executable ──────────────────────────────────
               const installDir = `${getCursorTypeDirForClient('mcp')}/${sub.name}`;
               const writeActions: string[] = [];
@@ -998,45 +1096,55 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             }
           } else {
             // No mcp-config.json: heuristic fallback
-            const installDir = `${getCursorTypeDirForClient('mcp')}/${sub.name}`;
-            const writeActions: string[] = [];
-            for (const file of resourceFiles) {
-              const normalised = path.normalize(file.path);
-              if (normalised.startsWith('..')) continue;
-              const fileDest = `${installDir}/${normalised}`;
+            if (resolvedProfile === 'codex') {
+              // Codex: emit a bare merge_toml with minimal entry
+              const tomlPath = clientAdapter.getMcpConfigPath();
+              queueCodexMcpTomlAction(localActions, tomlPath, sub.name, { command: 'node', args: [] });
+              logger.info(
+                { resourceId: sub.id, resourceName: sub.name, tomlPath, profile: 'codex' },
+                'sync_resources: Codex MCP heuristic — merge_toml action queued (no mcp-config.json)',
+              );
+            } else {
+              const installDir = `${getCursorTypeDirForClient('mcp')}/${sub.name}`;
+              const writeActions: string[] = [];
+              for (const file of resourceFiles) {
+                const normalised = path.normalize(file.path);
+                if (normalised.startsWith('..')) continue;
+                const fileDest = `${installDir}/${normalised}`;
+                localActions.push({
+                  action: 'write_file',
+                  path: fileDest,
+                  ...encodeForRender(file.path, file.content),
+                });
+                writeActions.push(fileDest);
+              }
+              const jsEntry = resourceFiles.find((f) => f.path.endsWith('.js'));
+              const pyEntry = resourceFiles.find((f) => f.path.endsWith('.py'));
+              const entryFile = jsEntry ?? pyEntry ?? resourceFiles[0];
+              const cmd = jsEntry ? 'node' : 'python3';
+              const entryPath = `${installDir}/${entryFile?.path ?? ''}`;
               localActions.push({
-                action: 'write_file',
-                path: fileDest,
-                ...encodeForRender(file.path, file.content),
+                action: 'merge_mcp_json',
+                mcp_json_path: mcpJsonPath,
+                server_name: sub.name,
+                entry: { command: cmd, args: [entryPath] },
+                skip_if_exists: true,
               });
-              writeActions.push(fileDest);
+              logger.info(
+                {
+                  resourceId: sub.id,
+                  resourceName: sub.name,
+                  format: 'heuristic',
+                  installDir,
+                  mcpJsonPath,
+                  cmd,
+                  entryPath,
+                  writeFiles: writeActions,
+                },
+                'sync_resources: MCP heuristic fallback — write_file + merge_mcp_json actions queued',
+              );
+              logToolStep('sync_resources', 'MCP heuristic fallback: write_file + merge_mcp_json queued', { resourceId: sub.id });
             }
-            const jsEntry = resourceFiles.find((f) => f.path.endsWith('.js'));
-            const pyEntry = resourceFiles.find((f) => f.path.endsWith('.py'));
-            const entryFile = jsEntry ?? pyEntry ?? resourceFiles[0];
-            const cmd = jsEntry ? 'node' : 'python3';
-            const entryPath = `${installDir}/${entryFile?.path ?? ''}`;
-            localActions.push({
-              action: 'merge_mcp_json',
-              mcp_json_path: mcpJsonPath,
-              server_name: sub.name,
-              entry: { command: cmd, args: [entryPath] },
-              skip_if_exists: true,
-            });
-            logger.info(
-              {
-                resourceId: sub.id,
-                resourceName: sub.name,
-                format: 'heuristic',
-                installDir,
-                mcpJsonPath,
-                cmd,
-                entryPath,
-                writeFiles: writeActions,
-              },
-              'sync_resources: MCP heuristic fallback — write_file + merge_mcp_json actions queued',
-            );
-            logToolStep('sync_resources', 'MCP heuristic fallback: write_file + merge_mcp_json queued', { resourceId: sub.id });
           }
 
           tally.synced++;
@@ -1052,11 +1160,29 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
         // or has different content, the AI writes it unconditionally, which also
         // recovers files that were accidentally deleted by the user.
         //
-        // DUAL-LAYER STRATEGY (v1.6):
+        // DUAL-LAYER STRATEGY (v1.6, Cursor only):
         //   - scope='global'    → write to ~/.cursor/rules/ only (macOS support)
         //   - scope='workspace' → write to ${WORKSPACE}/.cursor/rules/ only (Windows support)
         //   - scope='all'       → write to BOTH locations (maximum compatibility)
+        //
+        // CODEX STRATEGY: rules are aggregated into csp-routing-policy.md and injected
+        // via developer_instructions in config.toml (no .mdc files written to disk).
         if (sub.type === 'rule') {
+          if (resolvedProfile === 'codex') {
+            // Collect rule content for policy aggregation; no individual file actions.
+            for (const file of resourceFiles) {
+              codexRuleContents.push({ name: sub.name, content: file.content });
+            }
+            logger.info(
+              { resourceId: sub.id, resourceName: sub.name, profile: 'codex' },
+              'sync_resources: Rule collected for Codex policy aggregation',
+            );
+            tally.synced++;
+            details.push({ id: sub.id, name: sub.name, action: 'synced', version: resourceVersion });
+            continue;
+          }
+
+          // ── Cursor: dual-layer .mdc file strategy (unchanged) ──────────────
           const writeActions: Array<{ destPath: string; contentLength: number }> = [];
 
           // Determine target directories based on scope parameter
@@ -1148,10 +1274,74 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
       );
     }
 
-    // ── Step 5: Health score ───────────────────────────────────────────────
+    // ── Step 5 (Codex): Aggregate collected rules into policy actions ──────
+    // If any rule content was collected during this sync run, materialise the
+    // csp-routing-policy.md file and emit a merge_toml action to inject it
+    // into developer_instructions in ~/.codex/config.toml.
+    let restartRequired = false;
+    let restartHint: string | undefined;
+
+    if (resolvedProfile === 'codex' && codexRuleContents.length > 0) {
+      try {
+        const policyStrategy = clientAdapter.getPolicyStrategy();
+        const policyContent = generatePolicyContent(codexRuleContents);
+        const policyFile = policyStrategy.policyFile ?? '~/.csp-ai-agent/codex/csp-routing-policy.md';
+        const tomlPath = policyStrategy.configTomlPath ?? '~/.codex/config.toml';
+        const tomlKey = policyStrategy.configTomlKey ?? 'developer_instructions';
+
+        // 1. Write the policy markdown file
+        localActions.push({
+          action: 'write_file',
+          path: policyFile,
+          content: policyContent,
+          encoding: 'utf8',
+        });
+
+        // 2. Inject the policy file reference into developer_instructions.
+        // overwrite: false keeps this action idempotent after the first
+        // successful setup, so restart hints do not force a re-apply loop.
+        localActions.push({
+          action: 'merge_toml',
+          toml_path: tomlPath,
+          key: tomlKey,
+          value: `Please read and follow the CSP routing policy at: ${policyFile}`,
+          overwrite: false,
+        });
+
+        restartRequired = true;
+        restartHint = `CSP routing policy has been updated. Please restart Codex for the policy to take effect: codex`;
+        logger.info(
+          { profile: 'codex', policyFile, tomlPath, ruleCount: codexRuleContents.length },
+          'sync_resources: Codex policy materialised — merge_toml action queued',
+        );
+      } catch (err) {
+        logger.error(
+          { error: err instanceof Error ? err.message : String(err) },
+          'sync_resources: Failed to generate Codex policy',
+        );
+      }
+    }
+
+    // ── Step 6: Health score ───────────────────────────────────────────────
     const healthScore = tally.total > 0
       ? Math.round(((tally.synced + tally.cached + tally.skipped) / tally.total) * 100)
       : 100;
+
+    const pendingSetup = localActions.flatMap((action) => {
+      if (action.action !== 'merge_mcp_json' || !action.missing_env || action.missing_env.length === 0) {
+        return [];
+      }
+
+      return [{
+        server_name: action.server_name,
+        mcp_json_path: action.mcp_json_path,
+        missing_env: action.missing_env,
+        command_needs_verification: typeof action.entry.command === 'string',
+        command: typeof action.entry.command === 'string' ? action.entry.command : '',
+        setup_hint: action.setup_hint ?? `Fill in env vars for MCP server "${action.server_name}".`,
+        ...(action.setup_doc ? { setup_doc: action.setup_doc } : {}),
+      }];
+    });
 
     const result: SyncResourcesResult = {
       mode,
@@ -1159,7 +1349,9 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
       summary: tally,
       details,
       ...(skippedResources.length > 0 ? { skipped_resources: skippedResources } : {}),
+      ...(pendingSetup.length > 0 ? { pending_setup: pendingSetup } : {}),
       ...(localActions.length > 0 ? { local_actions_required: localActions } : {}),
+      ...(restartRequired ? { restart_required: true, restart_hint: restartHint } : {}),
     };
 
     const duration = Date.now() - startTime;

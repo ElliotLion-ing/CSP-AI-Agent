@@ -3,12 +3,7 @@
  * Implements Model Context Protocol server with dual transport support
  */
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
 import { logger } from './utils/logger';
 import { config } from './config';
 import { toolRegistry } from './tools/registry';
@@ -22,9 +17,18 @@ import {
   resolvePromptContentTool,
   queryUsageStatsTool,
 } from './tools';
-import { httpServer } from './server/http';
+import { httpServer, createMcpServerInstance } from './server/http';
+import { streamableHttpServer } from './server/streamable-http.js';
+import { adapterRegistry } from './client-adapters/index.js';
+import { CursorAdapter } from './client-adapters/cursor-adapter.js';
+import { CodexAdapter } from './client-adapters/codex-adapter.js';
 
-let server: Server | null = null;
+// Register client adapters at startup.
+// Cursor adapter is registered first so it serves as the default fallback.
+adapterRegistry.register(new CursorAdapter());
+adapterRegistry.register(new CodexAdapter());
+
+let stdioServer: ReturnType<typeof createMcpServerInstance> | null = null;
 
 /**
  * Register all MCP tools
@@ -43,108 +47,25 @@ function registerTools() {
 
   logger.info(
     { toolCount: toolRegistry.getToolCount() },
-    `Registered ${toolRegistry.getToolCount()} MCP tools`
+    `Registered ${toolRegistry.getToolCount()} MCP tools`,
   );
 }
 
 /**
- * Start MCP Server with stdio transport
+ * Start MCP Server with stdio transport.
+ * Reuses createMcpServerInstance() from http.ts to avoid duplicating
+ * handler registration (promptManager, tools, oninitialized auto-sync).
  */
 async function startStdioServer(): Promise<void> {
   logger.info('Starting MCP Server with stdio transport...');
 
-  // Create MCP Server
-  server = new Server(
-    {
-      name: 'csp-ai-agent-mcp',
-      version: '0.2.5',
-    },
-    {
-      capabilities: {
-        tools: {},
-        prompts: {},
-      },
-    }
-  );
+  // Reuse the shared factory — same capabilities, prompt handlers,
+  // tool handlers, and oninitialized auto-sync as the SSE path.
+  // No userId/email/groups for stdio (no auth header available).
+  stdioServer = createMcpServerInstance();
 
-  // Install Prompt list/get handlers so Command and Skill resources are
-  // exposed as MCP Prompts (Cursor slash commands).
-  const { promptManager } = await import('./prompts/index.js');
-  promptManager.installHandlers(server);
-
-  // Handle tools/list request
-  server.setRequestHandler(ListToolsRequestSchema, () => {
-    const tools = toolRegistry.getMCPToolDefinitions();
-    logger.debug({ toolCount: tools.length }, 'tools/list request handled');
-    return {
-      tools,
-    };
-  });
-
-  // Handle tools/call request
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
-
-    logger.info({ toolName: name, arguments: args }, `tools/call request: ${name}`);
-
-    const tool = toolRegistry.getTool(name);
-    if (!tool) {
-      const error = `Tool not found: ${name}`;
-      logger.error({ toolName: name }, error);
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: {
-                code: 'TOOL_NOT_FOUND',
-                message: error,
-              },
-            }),
-          },
-        ],
-        isError: true,
-      };
-    }
-
-    try {
-      // Call the tool handler
-      const result = await tool.handler(args || {});
-
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify(result),
-          },
-        ],
-      };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      logger.error({ toolName: name, error: errorMessage }, `Tool execution failed: ${name}`);
-
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: {
-                code: 'TOOL_EXECUTION_ERROR',
-                message: errorMessage,
-              },
-            }),
-          },
-        ],
-        isError: true,
-      };
-    }
-  });
-
-  // Connect to stdio transport
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await stdioServer.connect(transport);
 
   // Flush any pending telemetry immediately — stdio reconnects when Cursor
   // restarts the process, so treat connect as a reconnect event.
@@ -159,27 +80,47 @@ async function startStdioServer(): Promise<void> {
  */
 async function startSSEServer(): Promise<void> {
   logger.info('Starting MCP Server with SSE transport...');
-
-  // Start HTTP server
   await httpServer.start();
-
   logger.info('✅ MCP Server started successfully (SSE transport)');
 }
 
 /**
- * Start MCP Server (auto-detect transport mode)
+ * Start MCP Server with Streamable HTTP transport.
+ * Used by Codex CLI clients which use the 2025-03-26 Streamable HTTP spec.
+ */
+async function startStreamableHttpServer(): Promise<void> {
+  logger.info('Starting MCP Server with Streamable HTTP transport...');
+  await streamableHttpServer.start();
+  logger.info('✅ MCP Server started successfully (Streamable HTTP transport)');
+}
+
+/**
+ * Start MCP Server (auto-detect transport mode from config)
+ *
+ * Transport modes:
+ *   stdio           — local stdio (Cursor local MCP, default)
+ *   sse             — legacy SSE only (Cursor remote MCP)
+ *   streamable_http — Streamable HTTP only (Codex CLI)
+ *   dual            — SSE (port HTTP_PORT) + Streamable HTTP (port STREAMABLE_HTTP_PORT)
+ *                     simultaneously, serving Cursor and Codex from the same process
  */
 export async function startServer(): Promise<void> {
-  // Register all tools (common for both transports)
   registerTools();
 
-  // Start server based on transport mode
   const transportMode = config.transport.mode;
-  
-  logger.info({ transportMode }, `Starting server with ${transportMode} transport`);
+  logger.info({ transportMode, agentProfile: config.agentProfile }, `Starting server with ${transportMode} transport`);
 
-  if (transportMode === 'sse') {
+  if (transportMode === 'dual') {
+    // Start both transports concurrently; fail fast if either one throws.
+    await Promise.all([
+      startSSEServer(),
+      startStreamableHttpServer(),
+    ]);
+    logger.info('✅ Dual transport mode: SSE + Streamable HTTP both started');
+  } else if (transportMode === 'sse') {
     await startSSEServer();
+  } else if (transportMode === 'streamable_http') {
+    await startStreamableHttpServer();
   } else {
     await startStdioServer();
   }
@@ -193,14 +134,19 @@ export async function stopServer(): Promise<void> {
 
   const transportMode = config.transport.mode;
 
-  if (transportMode === 'sse') {
-    // Stop HTTP server
+  if (transportMode === 'dual') {
+    await Promise.all([
+      httpServer.stop(),
+      streamableHttpServer.stop(),
+    ]);
+  } else if (transportMode === 'sse') {
     await httpServer.stop();
+  } else if (transportMode === 'streamable_http') {
+    await streamableHttpServer.stop();
   } else {
-    // Stop stdio server
-    if (server) {
-      await server.close();
-      server = null;
+    if (stdioServer) {
+      await stdioServer.close();
+      stdioServer = null;
     }
   }
 

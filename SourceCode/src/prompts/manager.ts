@@ -115,6 +115,30 @@ export class PromptManager {
   private readonly userSyncActions = new Map<string, LocalAction[]>();
 
   /**
+   * Per-user cache of restart hints from Codex policy injection.
+   * Populated after a sync that emitted merge_toml actions requiring a restart.
+   * Consumed and cleared when the setup prompt is fetched.
+   */
+  private readonly userRestartHints = new Map<string, string>();
+
+  /**
+   * Per-user local opt-out set for subscriptions that the CSP API still returns.
+   *
+   * Some baseline/default subscriptions are returned by the server with no
+   * removable user subscription row.  The remove API may therefore report
+   * removed_count=0 even though the user explicitly unsubscribed.  We keep this
+   * local override so list/search/sync remain consistent for the current MCP
+   * process without changing server-side defaults for other clients.
+   */
+  private readonly locallyUnsubscribedResourceIds = new Map<string, Set<string>>();
+
+  /**
+   * Monotonic per-user state version used by tools that cache derived
+   * subscription/install status.
+   */
+  private readonly subscriptionStateVersions = new Map<string, number>();
+
+  /**
    * Tracks which Server instances already have handlers installed.
    * Each SSE connection creates a new Server instance, so we track per-instance
    * rather than using a global boolean flag (which would skip registration on
@@ -174,6 +198,82 @@ export class PromptManager {
     return map;
   }
 
+  private bumpSubscriptionStateVersion(userToken: string): void {
+    this.subscriptionStateVersions.set(
+      userToken,
+      (this.subscriptionStateVersions.get(userToken) ?? 0) + 1,
+    );
+  }
+
+  getSubscriptionStateVersion(userToken: string): number {
+    return this.subscriptionStateVersions.get(userToken) ?? 0;
+  }
+
+  suppressSubscriptions(userToken: string, resourceIds: string[]): void {
+    if (resourceIds.length === 0) return;
+
+    let set = this.locallyUnsubscribedResourceIds.get(userToken);
+    if (!set) {
+      set = new Set<string>();
+      this.locallyUnsubscribedResourceIds.set(userToken, set);
+    }
+
+    let changed = false;
+    for (const id of resourceIds) {
+      if (!set.has(id)) {
+        set.add(id);
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      this.bumpSubscriptionStateVersion(userToken);
+      logger.info(
+        {
+          resourceIds,
+          userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
+        },
+        'PromptManager: applied local subscription suppression',
+      );
+    }
+  }
+
+  clearSuppressedSubscriptions(userToken: string, resourceIds: string[]): void {
+    const set = this.locallyUnsubscribedResourceIds.get(userToken);
+    if (!set || resourceIds.length === 0) return;
+
+    let changed = false;
+    for (const id of resourceIds) {
+      if (set.delete(id)) {
+        changed = true;
+      }
+    }
+    if (set.size === 0) {
+      this.locallyUnsubscribedResourceIds.delete(userToken);
+    }
+
+    if (changed) {
+      this.bumpSubscriptionStateVersion(userToken);
+      logger.info(
+        {
+          resourceIds,
+          userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
+        },
+        'PromptManager: cleared local subscription suppression',
+      );
+    }
+  }
+
+  isSubscriptionSuppressed(userToken: string, resourceId: string): boolean {
+    return this.locallyUnsubscribedResourceIds.get(userToken)?.has(resourceId) ?? false;
+  }
+
+  filterSuppressedSubscriptions<T extends { id: string }>(userToken: string, subscriptions: T[]): T[] {
+    const suppressed = this.locallyUnsubscribedResourceIds.get(userToken);
+    if (!suppressed || suppressed.size === 0) return subscriptions;
+    return subscriptions.filter((subscription) => !suppressed.has(subscription.id));
+  }
+
   /**
    * Cache the local_actions_required result from the most recent background
    * sync for a user.  Called by http.ts after oninitialized sync completes.
@@ -183,6 +283,7 @@ export class PromptManager {
    */
   storeSyncActions(userToken: string, actions: LocalAction[]): void {
     this.userSyncActions.set(userToken, actions);
+    this.bumpSubscriptionStateVersion(userToken);
     logger.info(
       {
         userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
@@ -194,6 +295,32 @@ export class PromptManager {
   }
 
   /**
+   * Store a restart hint for the given user.
+   * Called when sync_resources produces merge_toml actions that require a
+   * Codex session restart to take effect.
+   */
+  storeRestartHint(userToken: string, hint: string): void {
+    this.userRestartHints.set(userToken, hint);
+    logger.info(
+      { userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous' },
+      'PromptManager: cached restart_hint for user',
+    );
+  }
+
+  /**
+   * Consume and return the cached restart hint for a user.
+   * Returns undefined if no hint is cached.
+   * The cache is cleared after retrieval.
+   */
+  consumeRestartHint(userToken: string): string | undefined {
+    const hint = this.userRestartHints.get(userToken);
+    if (hint !== undefined) {
+      this.userRestartHints.delete(userToken);
+    }
+    return hint;
+  }
+
+  /**
    * Consume and return the cached sync actions for a user.
    * Returns undefined if no actions are cached (nothing to do).
    * The cache is cleared after retrieval to prevent stale replays.
@@ -202,6 +329,7 @@ export class PromptManager {
     const actions = this.userSyncActions.get(userToken);
     if (actions !== undefined) {
       this.userSyncActions.delete(userToken);
+      this.bumpSubscriptionStateVersion(userToken);
       logger.info(
         {
           userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
@@ -211,6 +339,108 @@ export class PromptManager {
       );
     }
     return actions;
+  }
+
+  /**
+   * Read resource-specific pending local actions without consuming them.
+   *
+   * resolve_prompt_content has no acknowledgement channel proving the caller
+   * executed returned write_file/delete_file actions, so it must not clear the
+   * cache.  The setup prompt remains the only consuming path.
+   */
+  peekSyncActionsForResource(userToken: string, resourceName: string): LocalAction[] | undefined {
+    const actions = this.userSyncActions.get(userToken);
+    if (!actions || actions.length === 0) return undefined;
+
+    const normalizedName = resourceName.toLowerCase().replace(/\s+/g, '-');
+    const matched = actions.filter((action) => this.actionReferencesResource(action, normalizedName));
+    return matched.length > 0 ? matched : undefined;
+  }
+
+  /**
+   * Read cached sync actions without consuming them.
+   * Used by status/reporting tools that need to know whether local setup work
+   * is still pending for a user.
+   */
+  peekSyncActions(userToken: string): LocalAction[] | undefined {
+    return this.userSyncActions.get(userToken);
+  }
+
+  /**
+   * Whether the user still has unconsumed local setup actions pending.
+   */
+  hasPendingSyncActions(userToken: string): boolean {
+    const actions = this.userSyncActions.get(userToken);
+    return Array.isArray(actions) && actions.length > 0;
+  }
+
+  /**
+   * Best-effort resource-level pending-setup detection.
+   *
+   * We cannot observe the user's local filesystem from a remote MCP server, so
+   * for Codex we treat an unconsumed local action that references the resource
+   * as evidence that installation is not complete yet.
+   */
+  hasPendingSyncActionsForResource(userToken: string, resourceName: string): boolean {
+    const actions = this.userSyncActions.get(userToken);
+    if (!actions || actions.length === 0) return false;
+
+    const normalizedName = resourceName.toLowerCase().replace(/\s+/g, '-');
+    return actions.some((action) => this.actionReferencesResource(action, normalizedName));
+  }
+
+  /**
+   * Consume only the pending local actions that reference a specific resource.
+   * Unrelated pending actions remain cached for the setup prompt or later calls.
+   */
+  consumeSyncActionsForResource(userToken: string, resourceName: string): LocalAction[] | undefined {
+    const actions = this.userSyncActions.get(userToken);
+    if (!actions || actions.length === 0) return undefined;
+
+    const normalizedName = resourceName.toLowerCase().replace(/\s+/g, '-');
+    const matched = actions.filter((action) => this.actionReferencesResource(action, normalizedName));
+    if (matched.length === 0) return undefined;
+
+    const remaining = actions.filter((action) => !this.actionReferencesResource(action, normalizedName));
+    if (remaining.length > 0) {
+      this.userSyncActions.set(userToken, remaining);
+    } else {
+      this.userSyncActions.delete(userToken);
+    }
+    this.bumpSubscriptionStateVersion(userToken);
+
+    logger.info(
+      {
+        userTokenPrefix: userToken ? `${userToken.slice(0, 12)}...` : 'anonymous',
+        resourceName: normalizedName,
+        consumedActionCount: matched.length,
+        remainingActionCount: remaining.length,
+      },
+      'PromptManager: served resource-scoped local_actions_required from pending setup cache',
+    );
+    return matched;
+  }
+
+  private actionReferencesResource(action: LocalAction, normalizedName: string): boolean {
+    const pathNeedles = [`/${normalizedName}/`, `/${normalizedName}.`, `\\${normalizedName}\\`, `\\${normalizedName}.`];
+    switch (action.action) {
+      case 'write_file':
+      case 'delete_file':
+      case 'check_file': {
+        const actionPath = action.path.toLowerCase();
+        return pathNeedles.some((needle) => actionPath.includes(needle));
+      }
+      case 'merge_mcp_json':
+      case 'remove_mcp_json_entry':
+      case 'remove_toml_entry':
+        return action.server_name.toLowerCase() === normalizedName;
+      case 'merge_toml': {
+        const valueText = typeof action.value === 'string' ? action.value.toLowerCase() : JSON.stringify(action.value).toLowerCase();
+        return action.key.toLowerCase().includes(normalizedName) || valueText.includes(normalizedName);
+      }
+      default:
+        return false;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -485,6 +715,8 @@ export class PromptManager {
         // immediately without needing to call sync_resources first.
         const cachedActions = this.consumeSyncActions(setupToken);
         const hasCachedActions = cachedActions && cachedActions.length > 0;
+        // Consume restart hint (Codex only — set when merge_toml actions were emitted).
+        const restartHint = this.consumeRestartHint(setupToken);
 
         logger.info(
           {
@@ -501,6 +733,10 @@ export class PromptManager {
         // Build the action-execution instructions section.
         // When cached actions are available, embed them directly so the AI can
         // execute them without an extra sync_resources round-trip.
+        const restartSection = restartHint
+          ? `\n\n⚠️ **Restart required**: ${restartHint}\n`
+          : '';
+
         const actionInstructions = hasCachedActions
           ? (
             `### Step 1 — Apply these local actions NOW\n` +
@@ -509,14 +745,30 @@ export class PromptManager {
             `\`\`\`json\n${JSON.stringify(cachedActions, null, 2)}\n\`\`\`\n\n` +
             `Action execution rules:\n` +
             `- **\`write_file\`**: Create or overwrite the file at \`path\` with \`content\`. ` +
-            `Expand \`~\` to the user's home directory. Create parent directories if needed.\n` +
+            `If \`encoding === "base64"\`, decode \`content\` with \`Buffer.from(content, "base64")\` and write bytes, not the raw base64 string. ` +
+            `Expand \`~\` to the user's home directory. Create parent directories if needed. ` +
+            `For complex skill actions with \`is_skill_manifest: true\`, decode \`skill_manifest_content\` from base64, compare it with ` +
+            `\`~/.csp-ai-agent/.manifests/<skill-name>.md\`, and if unchanged skip this action and subsequent \`write_file\` actions for the same skill. ` +
+            `If changed or missing, write all script files, then write the decoded manifest to \`.manifests/<skill-name>.md\`. ` +
+            `Never write \`SKILL.md\` into the skill script directory; it belongs only in \`.manifests\`. ` +
+            `**CRITICAL: if the action contains a \`mode\` field (e.g. \`"0755"\`), you MUST set the file's Unix permissions ` +
+            `after writing using \`chmod(path, parseInt(mode, 8))\` (or \`fs.chmodSync\` in Node.js). ` +
+            `Failure to apply \`mode\` will leave scripts non-executable — this breaks skill execution.**\n` +
             `- **\`merge_mcp_json\`**: Read \`~/.cursor/mcp.json\` (create if missing), ` +
             `add or update \`mcpServers[server_name]\` with the \`entry\` object. Do not remove existing entries.\n` +
+            `- **\`merge_toml\`**: Read the TOML file at \`toml_path\` (create if missing), ` +
+            `set or update the \`key\` (dot-notation) to \`value\`. If \`value\` is an object and ` +
+            `\`key\` is like \`mcp_servers.<name>\`, write it as the TOML table \`[mcp_servers.<name>]\`; ` +
+            `do not write the object as quoted or escaped JSON. ` +
+            `When \`overwrite\` is false, skip only when the existing scalar/table is already non-empty. Write the file back.\n` +
             `- **\`delete_file\`**: Delete the file or directory at \`path\`. ` +
             `If \`recursive\` is true, delete the directory recursively. Skip if not found.\n` +
             `- **\`remove_mcp_json_entry\`**: Read \`~/.cursor/mcp.json\`, ` +
-            `remove \`mcpServers[server_name]\` if it exists, then write the file back.\n\n` +
-            `### Step 2 — Report\n`
+            `remove \`mcpServers[server_name]\` if it exists, then write the file back.\n` +
+            `- **\`remove_toml_entry\`**: Read the TOML file at \`toml_path\` (e.g. \`~/.codex/config.toml\`), ` +
+            `remove the table section \`[mcp_servers.<server_name>]\` if it exists, then write the file back. No-op when the section is absent.\n` +
+            restartSection +
+            `\n### Step 2 — Report\n`
           )
           : (
             `### Step 1 — Sync AI resources\n` +
@@ -527,13 +779,28 @@ export class PromptManager {
             `If the \`sync_resources\` result contains a \`local_actions_required\` array, ` +
             `execute every action on the user's LOCAL machine:\n\n` +
             `- **\`write_file\`**: Create or overwrite file at \`path\` with \`content\`. ` +
-            `Expand \`~\` to the user's home directory. Create parent directories if needed.\n` +
+            `If \`encoding === "base64"\`, decode \`content\` with \`Buffer.from(content, "base64")\` and write bytes, not the raw base64 string. ` +
+            `Expand \`~\` to the user's home directory. Create parent directories if needed. ` +
+            `For complex skill actions with \`is_skill_manifest: true\`, decode \`skill_manifest_content\` from base64, compare it with ` +
+            `\`~/.csp-ai-agent/.manifests/<skill-name>.md\`, and if unchanged skip this action and subsequent \`write_file\` actions for the same skill. ` +
+            `If changed or missing, write all script files, then write the decoded manifest to \`.manifests/<skill-name>.md\`. ` +
+            `Never write \`SKILL.md\` into the skill script directory; it belongs only in \`.manifests\`. ` +
+            `**CRITICAL: if the action contains a \`mode\` field (e.g. \`"0755"\`), you MUST set the file's Unix permissions ` +
+            `after writing using \`chmod(path, parseInt(mode, 8))\` (or \`fs.chmodSync\` in Node.js). ` +
+            `Failure to apply \`mode\` will leave scripts non-executable — this breaks skill execution.**\n` +
             `- **\`merge_mcp_json\`**: Read \`~/.cursor/mcp.json\` (create if missing), ` +
             `add or update \`mcpServers[server_name]\` with the \`entry\` object. Do not remove existing entries.\n` +
+            `- **\`merge_toml\`**: Read the TOML file at \`toml_path\` (create if missing), ` +
+            `set or update the \`key\` (dot-notation) to \`value\`. If \`value\` is an object and ` +
+            `\`key\` is like \`mcp_servers.<name>\`, write it as the TOML table \`[mcp_servers.<name>]\`; ` +
+            `do not write the object as quoted or escaped JSON. ` +
+            `When \`overwrite\` is false, skip only when the existing scalar/table is already non-empty. Write the file back.\n` +
             `- **\`delete_file\`**: Delete the file or directory at \`path\`. ` +
             `If \`recursive\` is true, delete the directory recursively. Skip if not found.\n` +
             `- **\`remove_mcp_json_entry\`**: Read \`~/.cursor/mcp.json\`, ` +
-            `remove \`mcpServers[server_name]\` if it exists, then write the file back.\n\n` +
+            `remove \`mcpServers[server_name]\` if it exists, then write the file back.\n` +
+            `- **\`remove_toml_entry\`**: Read the TOML file at \`toml_path\` (e.g. \`~/.codex/config.toml\`), ` +
+            `remove the table section \`[mcp_servers.<server_name>]\` if it exists, then write the file back. No-op when the section is absent.\n\n` +
             `### Step 3 — Report\n`
           );
 
@@ -715,6 +982,7 @@ export class PromptManager {
    */
   async registerPrompt(meta: PromptResourceMeta, userToken: string): Promise<void> {
     const name = this.buildPromptName(meta);
+    this.clearSuppressedSubscriptions(userToken, [meta.resource_id]);
 
     // Generate and write the intermediate cache file (shared across users since
     // content is the same; only the in-memory registry is per-user).
@@ -763,6 +1031,7 @@ export class PromptManager {
     // Only fire for genuinely new prompts — refreshing existing ones does not
     // change the list from the client's perspective.
     if (isNewPrompt) {
+      this.bumpSubscriptionStateVersion(userToken);
       this.notifyPromptsChanged(userToken);
     }
   }
@@ -802,6 +1071,7 @@ export class PromptManager {
     // Notify connected MCP clients that the prompt list has changed so Cursor
     // removes the prompt immediately without requiring a reconnect.
     if (wasRegistered) {
+      this.bumpSubscriptionStateVersion(userToken);
       this.notifyPromptsChanged(userToken);
     }
   }
@@ -889,6 +1159,7 @@ export class PromptManager {
     }
 
     if (pruned.length > 0) {
+      this.bumpSubscriptionStateVersion(userToken);
       logger.info(
         {
           prunedCount: pruned.length,

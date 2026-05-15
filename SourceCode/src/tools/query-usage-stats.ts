@@ -8,12 +8,15 @@
 import { apiClient } from '../api/client';
 import { logger, logToolStep } from '../utils/logger';
 import { ToolResult } from '../types/tools';
+import { config } from '../config/index.js';
+import type { AgentProfile } from '../client-adapters/index.js';
 
 export interface QueryUsageStatsParams {
   resource_type?: 'command' | 'skill' | 'rule' | 'mcp' | 'all';
   start_date?: string; // yyyy-MM-dd format
   end_date?: string;   // yyyy-MM-dd format
   user_token?: string; // Auto-injected by MCP server
+  agent_profile?: 'cursor' | 'codex';
 }
 
 export interface UsageStatsResource {
@@ -24,6 +27,7 @@ export interface UsageStatsResource {
 }
 
 export interface UsageStatsResult {
+  agent_profile: AgentProfile;
   user_id: number;
   user_name: string;
   user_email: string;
@@ -43,11 +47,13 @@ export interface UsageStatsResult {
 export async function queryUsageStats(params: unknown): Promise<ToolResult<UsageStatsResult>> {
   const p = params as QueryUsageStatsParams;
   const userToken = p.user_token ?? '';
+  const agentProfile: AgentProfile = (p.agent_profile as AgentProfile | undefined) ?? config.agentProfile ?? 'cursor';
 
   logToolStep('query_usage_stats', 'Starting usage stats query', {
     resource_type: p.resource_type ?? 'all',
     start_date: p.start_date,
     end_date: p.end_date,
+    agent_profile: agentProfile,
     has_token: !!userToken,
   });
 
@@ -112,6 +118,7 @@ export async function queryUsageStats(params: unknown): Promise<ToolResult<Usage
     }
 
     logToolStep('query_usage_stats', 'Successfully retrieved usage stats', {
+      agent_profile: agentProfile,
       user_id: response.data.user_id,
       total_invocations: response.data.total_invocations,
       resource_count: response.data.resource_usage.length,
@@ -119,7 +126,10 @@ export async function queryUsageStats(params: unknown): Promise<ToolResult<Usage
 
     return {
       success: true,
-      data: response.data,
+      data: {
+        ...response.data,
+        agent_profile: agentProfile,
+      },
     };
   } catch (error) {
     logger.error(
@@ -160,6 +170,7 @@ Supports optional filtering by:
 - resource_type: Filter by 'command', 'skill', 'rule', or 'mcp' (default: all types)
 - start_date: Filter events from this date onward (yyyy-MM-dd format)
 - end_date: Filter events up to this date (yyyy-MM-dd format)
+- agent_profile: Echo the resolved caller profile ('cursor' or 'codex') for release-check verification
 
 User identity is automatically derived from the Authorization token.
 
@@ -189,6 +200,11 @@ Example usage:
       user_token: {
         type: 'string',
         description: 'User authentication token (auto-injected by MCP server)',
+      },
+      agent_profile: {
+        type: 'string',
+        enum: ['cursor', 'codex'],
+        description: 'AI client profile to echo in the response for release-check verification',
       },
     },
     required: [],

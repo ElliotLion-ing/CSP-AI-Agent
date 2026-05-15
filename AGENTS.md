@@ -130,6 +130,20 @@ System SHALL provide feature.
 
 **阶段性文档** 存放于 `Docs/Stage Develop Docs/Stage-N-feature-name.md`，内容包含：阶段目标、已完成功能、关键实现、设计决策、与初始设计的差异。
 
+### 里程碑完成标准（缺一不可）
+
+满足以下**全部条件**方可视为里程碑完成：
+
+```
+□ 1. 所有单元测试通过（或失败有根因分析文档）
+□ 2. 所有模拟服务 / 端到端测试通过
+□ 3. 两类测试的 TestReport 已写入 Test/ 对应目录
+□ 4. Memory/ 中已追加本里程碑的决策记录
+□ 5. 已执行阶段性 git commit
+```
+
+**禁止：** 上述任意一条未满足就 archive OpenSpec task 或进入下一阶段。
+
 ---
 
 ### 3. 自动生成文档规范
@@ -183,6 +197,58 @@ git push origin main
 ---
 
 ### 5. 发布流程规范
+
+**执行前必须先判断当前所在分支：**
+
+```
+当前分支 == main / release 分支？
+  → 走【正式发布流程】（见下）
+当前分支 == dev / feature 分支？
+  → 走【Dev 包发布流程】（见下）
+```
+
+---
+
+#### 【Dev 包发布流程】（当前分支为 dev / feature 分支时强制执行）
+
+**包名、版本号、tag 规则：**
+
+| 字段 | 规则 | 示例 |
+|------|------|------|
+| 包名 | `@elliotding/ai-agent-mcp-dev`（独立 dev 包，不得用产线包名） | — |
+| 版本号 | `<MAJOR>.<MINOR>.<PATCH+1>-dev.1`（在下一个产线版本号基础上加 `-dev.1`） | 产线是 `0.2.21` → dev 包版本 `0.2.23-dev.1` |
+| npm tag | `--tag dev`（prerelease 版本必须显式指定，否则 npm 报错） | — |
+
+**执行步骤：**
+
+```bash
+# Step 1: 修改 package.json
+# - name: "@elliotding/ai-agent-mcp-dev"
+# - version: "<next>-dev.1"（如 "0.2.23-dev.1"）
+
+# Step 2: 构建并发布到 dev tag（需用户确认）
+cd SourceCode && npm run build && npm publish --access public --tag dev
+
+# Step 3: 验证（dev tag 指向新版本，latest 不受影响）
+npm view @elliotding/ai-agent-mcp-dev dist-tags
+
+# Step 4: 还原 package.json（发布完成后必须恢复）
+# - name: "@elliotding/ai-agent-mcp"
+# - version: "<next>"（如 "0.2.22"，即产线下一个版本号）
+
+# Step 5: git commit 推送到 dev 分支（需用户确认）
+git add . && git commit -m "chore: bump version to <next>-dev.1 (dev pkg)" && git push origin <dev-branch>
+```
+
+**禁止行为：**
+- ❌ 在 dev 分支用产线包名 `@elliotding/ai-agent-mcp` 发布（会污染产线 latest）
+- ❌ 用 `--tag dev` 发布到产线包名下（会让 `@elliotding/ai-agent-mcp@dev` 指向测试版本）
+- ❌ prerelease 版本（含 `-dev.N`）不加 `--tag dev` 直接发布（npm 会报错）
+- ❌ 发布后忘记将 `package.json` 的包名和版本恢复为产线状态
+
+---
+
+#### 【正式发布流程】（当前分支为 main / release 分支时）
 
 **顺序：npm 发布 → 验证 → Git 提交（不可颠倒）**
 
@@ -433,6 +499,18 @@ Test/Test Reports/FEAT-xxx/
 - **预防措施**：增量同步永远以"资源级别"为粒度，不以"文件级别"为粒度
 - **相关规则**：#2（测试验证强制）
 
+#### ERR-2026-05-09-004
+- **错误**：在 dev 分支发包时，使用产线包名 `@elliotding/ai-agent-mcp` + `--tag dev` 发布，导致产线包的 dev tag 被污染
+- **发生时间**：2026-05-09
+- **错误原因**：未区分 dev 分支和 main 分支的发包策略，直接沿用产线发包命令并加 `--tag dev`
+- **正确做法**：
+  - dev 分支发包必须用独立包名 `@elliotding/ai-agent-mcp-dev`
+  - 版本号格式：`<next-version>-dev.N`（如 `0.2.23-dev.1`）
+  - 必须加 `--tag dev`（prerelease 版本 npm 强制要求）
+  - 发布后将 `package.json` 恢复为产线包名和版本
+- **预防措施**：每次发包前先用 `git branch --show-current` 确认当前分支，再根据规则 #5 选择对应发包流程
+- **相关规则**：#5（发布流程规范）
+
 ---
 
 ## 📁 项目目录说明
@@ -444,9 +522,14 @@ Test/               测试代码、Mock Server、测试报告
 Bug/                Bug 档案库
   Fixed Bugs/       已归档 Bug（只读）
 Docs/
-  Design/           整体架构设计文档（持续同步更新）
+  Design/           整体架构设计文档（持续同步更新）← 只读参考，改动必须先建变更文档
   FeatureDocs/      归档的 Feature 设计文档
   Stage Develop Docs/  初期开发阶段文档（历史）
+Knowledge Base/     知识库（设计变更、外部依赖文档）
+  Design Change/    设计变更文档（命名：{Module}-{DesignChange}-{Version}）
+  External Knowledge/  三方库 / 外部架构参考文档（命名：{Module}-{ExternalKnowledge}）
+  Others/           其他不属于以上类别的文档
+Memory/             Agent 操作决策记录（只追加，不删改）
 NewFeature/         进行中的 Feature 设计文档（归档后清空）
 openspec/           OpenSpec 变更管理
   changes/          活跃变更提案
@@ -454,6 +537,130 @@ openspec/           OpenSpec 变更管理
 Publish/            发布脚本
 Logs/               运行日志
 ```
+
+### 文档命名规范
+
+| 存放位置 | 命名格式 | 示例 |
+|---------|---------|------|
+| `Knowledge Base/Design Change/` | `{Module}-{DesignChange}-{Version}` | `CoreService-WSProtocol-v2` |
+| `Knowledge Base/External Knowledge/` | `{Module}-{ExternalKnowledge}` | `Agent-TokioRuntime` |
+| `Memory/` | `{YYYY-MM-DD}-{TaskID}-{简短描述}.md` | `2026-05-08-FEAT-001-add-subscription.md` |
+| `Bug/` | `BUG-YYYY-MM-DD-序号-简短标题/` | `BUG-2026-05-08-001-sync-crash/` |
+| `NewFeature/` | `FEAT-YYYY-MM-DD-序号-简短标题/` | `FEAT-2026-05-08-001-lazy-loading/` |
+
+### 文档创建策略
+
+- **`Docs/Design/`** — 只读参考，永不覆盖；任何设计改动必须在 `Knowledge Base/Design Change/` 新建带版本号的文档。
+- **`Knowledge Base/Design Change/`** — 每次设计改动必须在此建立带版本号的文档。
+- **`Knowledge Base/External Knowledge/`** — 所有引入的三方库、外部架构、工具使用文档存放于此。
+- **`Memory/`** — 每个 OpenSpec task action 完成后追加决策记录，只追加不删改。
+- **临时操作摘要**（一次性 shell 命令结果等）— **不生成文件**，仅在对话中展示。
+
+---
+
+## 📝 Memory — Agent 决策记录
+
+`Memory/` 是跨上下文窗口的**唯一持久化信息传递媒介**，对所有 Agent 可见、只追加、不删改。
+
+### Memory 写入规则
+
+- 每个 OpenSpec task action 完成后，责任 Agent 在 `Memory/` 追加一条记录。
+- 文件命名格式：`{YYYY-MM-DD}-{TaskID}-{简短描述}.md`
+- 每条记录必须包含以下字段：
+
+```
+- **Task**        — OpenSpec task ID 与标题
+- **Action**      — 执行了什么操作
+- **Decision**    — 关键决策及理由
+- **Outcome**     — 结果（成功 / 失败 / 部分完成）
+- **Known Issues**— 发现的 bug、限制或后续待办
+- **Next Steps**  — 下一步应做什么
+```
+
+### Memory 读取策略
+
+- **新会话启动**：只读最新的 1~3 条记录，快速重建当前进度，不强制全量读取。
+- **任务回溯 / bug 修复**：按需往前翻找相关阶段的记录。
+- **全量读取**：仅在首次启动（Memory 为空之后第一次有内容时）或需要全局回顾时才执行。
+
+### 上下文窗口交接流程
+
+当上下文窗口耗尽时：
+1. 当前 Agent 向 `Memory/` 写入当前状态摘要（包含进行到哪一步、遗留问题、下一步操作）。
+2. 同时调用 `context-relay` skill 保存进度到 `{workspace}/.cursor/context-relay/handoff.md`。
+3. 新 Agent 读取**最新的 Memory 记录**，重建当前状态，按需往前翻阅历史。
+4. 新 Agent 从最后记录的状态继续，**不重复已完成的工作**。
+
+**禁止：**
+- ❌ 上下文耗尽时不写 Memory 记录直接中断
+- ❌ 新会话启动时强制全量读取所有 Memory（开销大且没必要）
+- ❌ 删改 Memory/ 中已有内容（只追加）
+
+---
+
+## 🔍 代码检索策略
+
+### 工具优先级（从高到低）
+
+```
+优先级 1：GitNexus MCP 工具（结构化调用图 + 跨语言关系）
+  ├─ gitnexus_query    — 概念语义检索，了解模块关系和执行流程
+  ├─ gitnexus_context  — 获取符号的完整调用链（调用方 + 被调用方）
+  ├─ gitnexus_impact   — 改动影响范围分析（HIGH/CRITICAL 风险必须告知用户）
+  └─ gitnexus_detect_changes — commit 前确认改动范围
+
+  ⚠️ 若 GitNexus 返回结果不含代码内容（仅文件路径 / 符号名）或响应超时（>3s），
+     立即降级到优先级 2，无需重试。
+
+优先级 2：Cursor 原生工具（速度快且结果精确）
+  ├─ SemanticSearch  — 语义检索，用自然语言描述意图，找相关代码段
+  ├─ Grep            — 精确文本/正则搜索（已知符号名、字符串字面量）
+  ├─ Glob            — 按文件名模式批量定位文件
+  └─ Read            — 直接读取已知文件
+
+  适用场景（不必等 GitNexus 失败，可直接使用）：
+  - 精确字符串 / 正则查找（如 API 端点名、JSON 字段名、配置 key）
+  - 已知文件路径的内容读取
+  - struct / interface 字段访问
+
+优先级 3：Shell 命令（最后手段）
+  └─ rg (ripgrep)    — 大范围文本搜索，禁止用 grep/find
+```
+
+### 检索决策流程
+
+```
+收到检索请求
+  │
+  ├─ 已知精确符号名 / 字段名 / 字符串字面量？
+  │   └─ YES → 直接 Grep（跳过 GitNexus，避免噪音）
+  │
+  ├─ 需要了解跨模块调用链 / 执行路径 / 影响范围？
+  │   └─ YES → 优先 gitnexus_context / gitnexus_impact
+  │            └─ 结果仅返回文件路径无代码？→ 再用 Grep/Read 补全
+  │
+  ├─ 概念性问题（"A 和 B 怎么交互"）？
+  │   └─ YES → gitnexus_query 了解结构，再用 Grep 确认细节
+  │
+  └─ 已知文件路径？
+      └─ YES → 直接 Read
+```
+
+### 高风险改动强制流程
+
+以下情况**必须**在改动前运行 `gitnexus_impact`：
+- 修改 MCP Tool 接口或 WebSocket 消息协议
+- 修改数据库 Schema 或核心数据结构
+- 修改任务分发 / 路由逻辑
+- 修改配置结构体或全局状态
+
+impact 分析返回 **HIGH 或 CRITICAL** 时，**必须告知用户**并等待确认后再继续。
+
+### GitNexus 禁止行为
+
+- ❌ 不得用 `sed`/find-and-replace 全局重命名符号，必须使用 `gitnexus_rename`
+- ❌ 不得忽略 HIGH / CRITICAL 风险警告
+- ❌ 不得在未运行 `gitnexus_detect_changes()` 的情况下提交涉及多模块的重构
 
 ---
 
@@ -467,6 +674,12 @@ Logs/               运行日志
 **多线程架构：**
 - 必须使用多线程/异步架构，禁止单线程阻塞
 - 读操作响应 < 100ms，写操作 < 2s，支持 ≥ 50 并发
+
+**路径配置规范（强制）：**
+- **禁止在代码中硬编码任何绝对路径或相对路径**（包括项目根目录、脚本路径、输出目录等）。
+- 所有路径必须通过配置文件（如 `config/system.yaml`）或环境变量注入，代码中仅引用配置读取结果。
+- 脚本和 CI 中禁止硬编码用户名或机器相关的绝对路径；使用 `$HOME`、`$(pwd)` 等变量替代。
+- 路径相关的配置变更必须同步更新文档，不得只改代码不改配置说明。
 
 **安全基线：** 参考 `.cursor/rules/security-security-baseline.mdc`
 
@@ -517,3 +730,47 @@ Docs/Design/
 - v2.2.0: 新 Feature 全流程开发规范（规则 #10）
 - v2.3.0: 规则 #10 补充——归档后必须删除 NewFeature/ 对应文件夹；用户设计变更时必须同步更新 feature-design.md，归档版本与 NewFeature 版本保持一致
 - v2.4.0: 规则 #4 补充——所有改动最终必须推送到 main；推送后本地分支切换回 main；禁止改动孤立在 dev 分支
+
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence
+
+This project is indexed by GitNexus as **Codex-AI-Agent-MCP** (13409 symbols, 17684 relationships, 263 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+
+> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
+
+## Always Do
+
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
+- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
+- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
+
+## Never Do
+
+- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
+- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
+
+## Resources
+
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/Codex-AI-Agent-MCP/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/Codex-AI-Agent-MCP/clusters` | All functional areas |
+| `gitnexus://repo/Codex-AI-Agent-MCP/processes` | All execution flows |
+| `gitnexus://repo/Codex-AI-Agent-MCP/process/{name}` | Step-by-step execution trace |
+
+## CLI
+
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+
+<!-- gitnexus:end -->
