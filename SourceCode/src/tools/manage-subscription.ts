@@ -56,16 +56,27 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         let pendingSetup: unknown[] | undefined;
         let subscribeLocalActions: import('../types/tools.js').LocalAction[] | undefined;
 
-        if (shouldAutoSync && subResult.subscriptions.length > 0) {
-          logger.info({ resourceIds: typedParams.resource_ids }, 'Auto-syncing newly subscribed resources...');
+        const resourceIdsForAutoSync = Array.from(new Set(typedParams.resource_ids));
+        if (shouldAutoSync && resourceIdsForAutoSync.length > 0) {
+          logger.info(
+            {
+              resourceIds: resourceIdsForAutoSync,
+              newlyCreatedSubscriptionCount: subResult.subscriptions.length,
+            },
+            'Auto-syncing requested subscribed resources...',
+          );
           // Scope auto-sync to only the newly subscribed resource(s).
           // Passing resource_ids prevents processing all other subscribed resources,
           // which would generate unnecessary local_actions and waste context window.
+          // Important: sync the requested ids even when the subscribe API returns
+          // zero newly-created rows.  Default/baseline resources can be locally
+          // suppressed and then restored without creating a server-side row; they
+          // still need prompt registration and local actions rebuilt immediately.
           const syncResult = await syncResources({
             mode: 'incremental',
             scope: typedParams.scope || 'global',
             user_token: typedParams.user_token,
-            resource_ids: typedParams.resource_ids,
+            resource_ids: resourceIdsForAutoSync,
             agent_profile: typedParams.agent_profile,
           });
           if (syncResult.success && syncResult.data) {
@@ -87,9 +98,9 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
 
         // Build per-resource sync hint so the AI knows to use resource_ids
         // for a scoped incremental sync instead of syncing all resources.
-        const subscribedIds = subResult.subscriptions.map(s => s.id);
+        const subscribedIds = resourceIdsForAutoSync;
         const syncHint = subscribedIds.length > 0
-          ? `To sync ONLY the newly subscribed resource(s), call: sync_resources(mode="incremental", resource_ids=${JSON.stringify(subscribedIds)}). This avoids returning local_actions for ALL subscribed resources and drastically reduces context overhead.`
+          ? `To sync ONLY the requested resource(s), call: sync_resources(mode="incremental", resource_ids=${JSON.stringify(subscribedIds)}). This avoids returning local_actions for ALL subscribed resources and drastically reduces context overhead.`
           : undefined;
 
         result = {
@@ -102,7 +113,11 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             subscribed_at: sub.subscribed_at,
           })),
           message: [
-            `Successfully subscribed to ${subResult.subscriptions.length} resource${subResult.subscriptions.length > 1 ? 's' : ''}.`,
+            `Successfully processed subscribe request for ${resourceIdsForAutoSync.length} resource id${resourceIdsForAutoSync.length > 1 ? 's' : ''}.`,
+            `Server created ${subResult.subscriptions.length} new subscription${subResult.subscriptions.length !== 1 ? 's' : ''}.`,
+            subResult.subscriptions.length === 0 && shouldAutoSync
+              ? 'Requested resource(s) may already be subscribed or provided by baseline defaults; scoped auto-sync was still executed.'
+              : null,
             syncSummary,
             syncHint,
             subscribeLocalActions && subscribeLocalActions.length > 0
@@ -418,13 +433,20 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         let batchPendingSetup: unknown[] | undefined;
         let batchLocalActions: import('../types/tools.js').LocalAction[] | undefined;
 
-        if (shouldBatchAutoSync && batchSubResult.subscriptions.length > 0) {
-          logger.info({ count: batchSubResult.subscriptions.length }, 'Auto-syncing batch subscribed resources...');
+        const batchResourceIdsForAutoSync = Array.from(new Set(typedParams.resource_ids));
+        if (shouldBatchAutoSync && batchResourceIdsForAutoSync.length > 0) {
+          logger.info(
+            {
+              requestedCount: batchResourceIdsForAutoSync.length,
+              newlyCreatedSubscriptionCount: batchSubResult.subscriptions.length,
+            },
+            'Auto-syncing requested batch subscribed resources...',
+          );
           const batchSyncResult = await syncResources({
             mode: 'incremental',
             scope: typedParams.scope || 'global',
             user_token: typedParams.user_token,
-            resource_ids: typedParams.resource_ids,
+            resource_ids: batchResourceIdsForAutoSync,
             agent_profile: typedParams.agent_profile,
           });
           if (batchSyncResult.success && batchSyncResult.data) {
@@ -452,7 +474,11 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             subscribed_at: sub.subscribed_at,
           })),
           message: [
-            `Successfully batch subscribed to ${batchSubResult.subscriptions.length} resource${batchSubResult.subscriptions.length > 1 ? 's' : ''}.`,
+            `Successfully processed batch subscribe request for ${batchResourceIdsForAutoSync.length} resource id${batchResourceIdsForAutoSync.length > 1 ? 's' : ''}.`,
+            `Server created ${batchSubResult.subscriptions.length} new subscription${batchSubResult.subscriptions.length !== 1 ? 's' : ''}.`,
+            batchSubResult.subscriptions.length === 0 && shouldBatchAutoSync
+              ? 'Requested resource(s) may already be subscribed or provided by baseline defaults; scoped auto-sync was still executed.'
+              : null,
             batchSyncSummary,
             batchLocalActions && batchLocalActions.length > 0
               ? `IMPORTANT: ${batchLocalActions.length} local action(s) are still pending. Execute local_actions_required or fetch csp-ai-agent-setup before treating these resources as installed.`
