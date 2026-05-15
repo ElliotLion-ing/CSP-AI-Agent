@@ -1,3 +1,27 @@
+<#
+.SYNOPSIS
+  Install or update the csp-ai-agent MCP entry in ~/.codex/config.toml.
+
+.DESCRIPTION
+  If Windows blocks this script due to execution policy, run it with:
+    powershell -ExecutionPolicy Bypass -File .\codex-config.ps1 <UserToken> [McpUrl]
+
+  Or unblock just this file:
+    Unblock-File .\codex-config.ps1
+    .\codex-config.ps1 <UserToken>
+
+  Or allow local scripts for the current user (one-time):
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+.PARAMETER UserToken
+  JWT token obtained from the CSP platform.
+
+.PARAMETER McpUrl
+  MCP server URL (default: https://zct-dev.zoomdev.us/csp-agent/mcp).
+
+.EXAMPLE
+  powershell -ExecutionPolicy Bypass -File .\codex-config.ps1 eyJ0eXAiOi...
+#>
 param(
   [Parameter(Mandatory = $true)]
   [string]$UserToken,

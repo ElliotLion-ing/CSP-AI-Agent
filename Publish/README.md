@@ -64,6 +64,48 @@ git status
 
 ---
 
+## 🔧 Codex MCP 配置脚本
+
+用于将 `csp-ai-agent` MCP 条目写入用户本地 `~/.codex/config.toml`。
+
+### macOS / Linux
+
+```bash
+bash codex-config.sh <UserToken> [McpUrl]
+```
+
+### Windows PowerShell
+
+> **⚠️ Windows 执行策略说明**
+>
+> Windows 默认阻止运行未签名脚本。请使用以下任一方式运行：
+
+**推荐方式（绕过策略，不改变系统设置）：**
+```powershell
+powershell -ExecutionPolicy Bypass -File .\codex-config.ps1 <UserToken>
+```
+
+**解锁单个文件（一次性）：**
+```powershell
+Unblock-File .\codex-config.ps1
+.\codex-config.ps1 <UserToken>
+```
+
+**放开当前用户策略（永久，需管理员权限）：**
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+.\codex-config.ps1 <UserToken>
+```
+
+**参数说明：**
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `UserToken` | ✅ | 从 CSP 平台获取的 JWT Token |
+| `McpUrl` | ❌ | MCP 服务地址（默认 dev 环境） |
+
+---
+
 ## 📜 脚本说明
 
 ### npm-publish.sh
