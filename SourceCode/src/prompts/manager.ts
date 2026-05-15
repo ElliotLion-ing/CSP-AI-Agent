@@ -434,8 +434,10 @@ export class PromptManager {
       case 'remove_mcp_json_entry':
       case 'remove_toml_entry':
         return action.server_name.toLowerCase() === normalizedName;
-      case 'merge_toml':
-        return action.key.toLowerCase().includes(normalizedName) || action.value.toLowerCase().includes(normalizedName);
+      case 'merge_toml': {
+        const valueText = typeof action.value === 'string' ? action.value.toLowerCase() : JSON.stringify(action.value).toLowerCase();
+        return action.key.toLowerCase().includes(normalizedName) || valueText.includes(normalizedName);
+      }
       default:
         return false;
     }
@@ -755,8 +757,9 @@ export class PromptManager {
             `- **\`merge_mcp_json\`**: Read \`~/.cursor/mcp.json\` (create if missing), ` +
             `add or update \`mcpServers[server_name]\` with the \`entry\` object. Do not remove existing entries.\n` +
             `- **\`merge_toml\`**: Read the TOML file at \`toml_path\` (create if missing), ` +
-            `set or update the \`key\` (dot-notation) to \`value\`. If \`value\` is a JSON object and ` +
-            `\`key\` is like \`mcp_servers.<name>\`, write it as the TOML table \`[mcp_servers.<name>]\`. ` +
+            `set or update the \`key\` (dot-notation) to \`value\`. If \`value\` is an object and ` +
+            `\`key\` is like \`mcp_servers.<name>\`, write it as the TOML table \`[mcp_servers.<name>]\`; ` +
+            `do not write the object as quoted or escaped JSON. ` +
             `When \`overwrite\` is false, skip only when the existing scalar/table is already non-empty. Write the file back.\n` +
             `- **\`delete_file\`**: Delete the file or directory at \`path\`. ` +
             `If \`recursive\` is true, delete the directory recursively. Skip if not found.\n` +
@@ -788,8 +791,9 @@ export class PromptManager {
             `- **\`merge_mcp_json\`**: Read \`~/.cursor/mcp.json\` (create if missing), ` +
             `add or update \`mcpServers[server_name]\` with the \`entry\` object. Do not remove existing entries.\n` +
             `- **\`merge_toml\`**: Read the TOML file at \`toml_path\` (create if missing), ` +
-            `set or update the \`key\` (dot-notation) to \`value\`. If \`value\` is a JSON object and ` +
-            `\`key\` is like \`mcp_servers.<name>\`, write it as the TOML table \`[mcp_servers.<name>]\`. ` +
+            `set or update the \`key\` (dot-notation) to \`value\`. If \`value\` is an object and ` +
+            `\`key\` is like \`mcp_servers.<name>\`, write it as the TOML table \`[mcp_servers.<name>]\`; ` +
+            `do not write the object as quoted or escaped JSON. ` +
             `When \`overwrite\` is false, skip only when the existing scalar/table is already non-empty. Write the file back.\n` +
             `- **\`delete_file\`**: Delete the file or directory at \`path\`. ` +
             `If \`recursive\` is true, delete the directory recursively. Skip if not found.\n` +

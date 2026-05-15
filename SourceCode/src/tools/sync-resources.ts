@@ -186,7 +186,7 @@ function queueCodexMcpTomlAction(
     action: 'merge_toml',
     toml_path: tomlPath,
     key: `mcp_servers.${serverName}`,
-    value: JSON.stringify(toCodexMcpTomlEntry(entry)),
+    value: toCodexMcpTomlEntry(entry),
     overwrite: false,
   });
 }

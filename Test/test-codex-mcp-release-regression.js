@@ -45,6 +45,8 @@ assert(!sync.includes("key: `mcp.servers.${serverName}`"), 'Old Codex mcp.server
 assert(sync.includes("url.replace(/\\/sse\\/?$/, '/mcp')"), 'Codex MCP URL normalizes /sse to /mcp');
 assert(sync.includes('converted.http_headers = converted.headers'), 'Codex MCP converts headers to http_headers');
 assert(sync.includes("delete converted.transport"), 'Codex MCP removes Cursor transport marker');
+assert(sync.includes('value: toCodexMcpTomlEntry(entry)'), 'Codex MCP merge_toml value is a structured object');
+assert(!sync.includes('value: JSON.stringify(toCodexMcpTomlEntry(entry))'), 'Codex MCP merge_toml value is not escaped JSON');
 assert(sync.includes("action: 'merge_mcp_json'"), 'Cursor MCP path still emits merge_mcp_json');
 assert(sync.includes('overwrite: false') && sync.includes('successful setup, so restart hints do not force a re-apply loop'), 'Codex policy TOML action is idempotent');
 
@@ -57,11 +59,13 @@ assert(uninstall.includes("action: 'remove_toml_entry'"), 'Codex uninstall remov
 assert(uninstall.includes("Do not emit Cursor install-dir cleanup here"), 'Codex uninstall avoids Cursor cleanup path');
 assert(uninstall.includes("action: 'remove_mcp_json_entry'"), 'Cursor uninstall still removes mcp.json entry');
 
-assert(promptManager.includes('write it as the TOML table \\`[mcp_servers.<name>]\\`'), 'Setup prompt explains JSON object merge_toml table writes');
+assert(promptManager.includes('write it as the TOML table \\`[mcp_servers.<name>]\\`'), 'Setup prompt explains object merge_toml table writes');
+assert(promptManager.includes('do not write the object as quoted or escaped JSON'), 'Setup prompt forbids escaped JSON TOML writes');
 assert(promptManager.includes('encoding === "base64"'), 'Setup prompt requires base64 decoding for write_file actions');
 assert(promptManager.includes('skill_manifest_content'), 'Setup prompt explains complex skill manifest handling');
 assert(promptManager.includes('Never write \\`SKILL.md\\` into the skill script directory'), 'Setup prompt prevents SKILL.md from being written to script dir');
-assert(types.includes('JSON-encoded object'), 'MergeTomlAction documents JSON object values');
+assert(types.includes('Record<string, unknown>'), 'MergeTomlAction accepts structured object values');
+assert(!types.includes('JSON-encoded object'), 'MergeTomlAction no longer documents escaped JSON object values');
 assert(types.includes('resource_id?: string'), 'uninstall_resource params accept canonical resource_id for MCP cleanup');
 
 assert(usage.includes('agent_profile: AgentProfile'), 'query_usage_stats result exposes agent_profile');

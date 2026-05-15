@@ -165,8 +165,8 @@ export interface MergeTomlAction {
   toml_path: string;
   /** Dot-notation key path in the TOML document (e.g. `developer_instructions` or `mcp_servers.acm`). */
   key: string;
-  /** String scalar or JSON-encoded object to set for the key/table. */
-  value: string;
+  /** Scalar value or structured object to set for the key/table. */
+  value: string | number | boolean | Record<string, unknown>;
   /**
    * When true, replace an existing key value; when false, skip if the key
    * already has a non-empty value (safe default: false).
