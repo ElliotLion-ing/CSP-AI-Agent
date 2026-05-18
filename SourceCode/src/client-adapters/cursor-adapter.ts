@@ -24,6 +24,10 @@ export class CursorAdapter implements ClientAdapter {
   }
 
   /** Cursor slash commands → ~/.cursor/commands/<name>/ */
+  getManifestDir(): string {
+    return getCspAgentDirForClient('.manifests');
+  }
+
   getCommandDir(commandName: string): string {
     return `${getCursorRootDirForClient()}/commands/${commandName}`;
   }

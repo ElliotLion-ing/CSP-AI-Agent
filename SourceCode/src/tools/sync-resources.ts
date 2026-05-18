@@ -25,7 +25,6 @@ import {
   getCursorResourcePath,
   getCursorTypeDirForClient,
   getCursorRootDirForClient,
-  getCspAgentRootDirForClient,
 } from '../utils/cursor-paths';
 import { MCPServerError } from '../types/errors';
 import type {
@@ -431,11 +430,13 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                       });
                     }
                     
-                    // Also check the manifest file
+                    // Also check the manifest file in the active client's
+                    // manifest tree. Codex must not reuse legacy Cursor
+                    // manifests because that can skip Codex-only file writes.
                     const proxyScript = metadata.script_files[0];
                     localActions.push({
                       action: 'check_file',
-                      path: `${getCspAgentRootDirForClient()}/.manifests/${sub.name}.md`,
+                      path: `${clientAdapter.getManifestDir()}/${sub.name}.md`,
                       ...encodeForCheck(
                         proxyScript?.relative_path ?? '',
                         proxyScript?.content ?? '',
@@ -688,6 +689,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                 // This prevents the client from auto-discovering the skill while
                 // enabling script execution.
                 const skillDir = clientAdapter.getSkillDir(sub.name);
+                const manifestPath = `${clientAdapter.getManifestDir()}/${sub.name}.md`;
                 
                 // Generate write_file actions for script files ONLY (exclude SKILL.md)
                 // First script file carries is_skill_manifest marker for atomic update check
@@ -704,6 +706,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                     mode: firstScript.path.includes('scripts/') ? '0755' : undefined,
                     // Atomic update marker: client checks manifest FIRST
                     is_skill_manifest: true,
+                    manifest_path: manifestPath,
                     // SKILL.md content for version comparison (stored separately in .manifests/)
                     skill_manifest_content: Buffer.from(rawContent, "utf8").toString("base64"),
                   });
@@ -744,6 +747,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
 
                   // Use client-adapter-resolved directory (Cursor vs Codex subtree).
                   const skillDir = clientAdapter.getSkillDir(sub.name);
+                  const manifestPath = `${clientAdapter.getManifestDir()}/${sub.name}.md`;
                   
                   if (metadata.script_files.length > 0) {
                     const firstScript = metadata.script_files[0];
@@ -756,6 +760,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                         ...encodeForRender(firstScript.relative_path, firstScript.content, firstScript.encoding),
                         mode: firstScript.mode ?? (firstScript.relative_path.includes('scripts/') ? '0755' : undefined),
                         is_skill_manifest: true,
+                        manifest_path: manifestPath,
                         skill_manifest_content: Buffer.from(rawContent, "utf8").toString("base64"),
                       });
                     }
@@ -1483,7 +1488,7 @@ export const syncResourcesTool = {
     'For write_file actions: ' +
     '  SPECIAL HANDLING FOR COMPLEX SKILLS (when action has `is_skill_manifest: true`): ' +
     '    (1) This action is the FIRST script file — check skill version using manifest FIRST. ' +
-    '    (2) Read manifest file at {CSP_AGENT_ROOT}/.manifests/<skill-name>.md (if exists). ' +
+    '    (2) Read manifest file at action.manifest_path when present; otherwise read {CSP_AGENT_ROOT}/.manifests/<skill-name>.md. ' +
     '        Where {CSP_AGENT_ROOT} is a SIBLING of {CURSOR_ROOT} (same parent directory). ' +
     '    (3) action.skill_manifest_content is ALWAYS base64-encoded — first decode it: ' +
     '        decodedManifest = Buffer.from(action.skill_manifest_content, "base64").toString("utf8") ' +
@@ -1492,7 +1497,7 @@ export const syncResourcesTool = {
     '    (5) If different or manifest missing: ' +
     '        - PROCEED with this action and all subsequent write_file actions for this skill. ' +
     '        - After writing all script files, write decodedManifest (the UTF-8 form, NOT the raw base64 string) ' +
-    '          to {CSP_AGENT_ROOT}/.manifests/<skill-name>.md ' +
+    '          to action.manifest_path when present, otherwise {CSP_AGENT_ROOT}/.manifests/<skill-name>.md ' +
     '    (6) NOTE: SKILL.md is NEVER written to the skills directory (only to .manifests/) to prevent Cursor auto-discovery. ' +
     '  GENERAL HANDLING (when action has NO `is_skill_manifest` marker): ' +
     '    (1) Read the existing file at `path` (if it exists) using fs.readFile() or equivalent. ' +

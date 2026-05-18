@@ -32,6 +32,8 @@ const manageSubscriptionPath = path.join(root, 'SourceCode/src/tools/manage-subs
 const promptManagerPath = path.join(root, 'SourceCode/src/prompts/manager.ts');
 const typesPath = path.join(root, 'SourceCode/src/types/tools.ts');
 const usagePath = path.join(root, 'SourceCode/src/tools/query-usage-stats.ts');
+const codexAdapterPath = path.join(root, 'SourceCode/src/client-adapters/codex-adapter.ts');
+const cursorAdapterPath = path.join(root, 'SourceCode/src/client-adapters/cursor-adapter.ts');
 
 const sync = fs.readFileSync(syncPath, 'utf8');
 const uninstall = fs.readFileSync(uninstallPath, 'utf8');
@@ -39,6 +41,8 @@ const manageSubscription = fs.readFileSync(manageSubscriptionPath, 'utf8');
 const promptManager = fs.readFileSync(promptManagerPath, 'utf8');
 const types = fs.readFileSync(typesPath, 'utf8');
 const usage = fs.readFileSync(usagePath, 'utf8');
+const codexAdapter = fs.readFileSync(codexAdapterPath, 'utf8');
+const cursorAdapter = fs.readFileSync(cursorAdapterPath, 'utf8');
 
 assert(sync.includes("key: `mcp_servers.${serverName}`"), 'Codex MCP merge_toml targets mcp_servers.<name>');
 assert(!sync.includes("key: `mcp.servers.${serverName}`"), 'Old Codex mcp.servers.<name> key is removed');
@@ -49,6 +53,10 @@ assert(sync.includes('value: toCodexMcpTomlEntry(entry)'), 'Codex MCP merge_toml
 assert(!sync.includes('value: JSON.stringify(toCodexMcpTomlEntry(entry))'), 'Codex MCP merge_toml value is not escaped JSON');
 assert(sync.includes("action: 'merge_mcp_json'"), 'Cursor MCP path still emits merge_mcp_json');
 assert(sync.includes('overwrite: false') && sync.includes('successful setup, so restart hints do not force a re-apply loop'), 'Codex policy TOML action is idempotent');
+assert(sync.includes('manifest_path: manifestPath'), 'Complex skill write_file actions carry explicit manifest_path');
+assert(sync.includes('clientAdapter.getManifestDir()'), 'Complex skill manifests are resolved through the active client adapter');
+assert(codexAdapter.includes('getCodexManifestDirForClient') && codexAdapter.includes('return getCodexManifestDirForClient()'), 'Codex manifests use ~/.csp-ai-agent/codex/.manifests');
+assert(cursorAdapter.includes("return getCspAgentDirForClient('.manifests')"), 'Cursor manifests keep the legacy ~/.csp-ai-agent/.manifests path');
 
 assert(uninstall.includes("agentProfile === 'codex'"), 'Uninstall has Codex branch');
 assert(uninstall.includes('resolveMcpServerNamesForUninstall'), 'Uninstall resolves all MCP server names from mcp-config.json');
@@ -63,8 +71,11 @@ assert(promptManager.includes('write it as the TOML table \\`[mcp_servers.<name>
 assert(promptManager.includes('do not write the object as quoted or escaped JSON'), 'Setup prompt forbids escaped JSON TOML writes');
 assert(promptManager.includes('encoding === "base64"'), 'Setup prompt requires base64 decoding for write_file actions');
 assert(promptManager.includes('skill_manifest_content'), 'Setup prompt explains complex skill manifest handling');
+assert(promptManager.includes('action.manifest_path'), 'Setup prompt uses action.manifest_path for complex skill manifest comparison');
+assert(promptManager.includes('Create parent directories for both \\`path\\` and any \\`manifest_path\\`'), 'Setup prompt requires creating manifest parent directories');
 assert(promptManager.includes('Never write \\`SKILL.md\\` into the skill script directory'), 'Setup prompt prevents SKILL.md from being written to script dir');
 assert(types.includes('Record<string, unknown>'), 'MergeTomlAction accepts structured object values');
+assert(types.includes('manifest_path?: string'), 'WriteFileAction exposes optional manifest_path');
 assert(!types.includes('JSON-encoded object'), 'MergeTomlAction no longer documents escaped JSON object values');
 assert(types.includes('resource_id?: string'), 'uninstall_resource params accept canonical resource_id for MCP cleanup');
 

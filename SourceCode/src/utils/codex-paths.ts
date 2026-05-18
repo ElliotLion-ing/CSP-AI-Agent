@@ -30,6 +30,13 @@ export function getCodexSkillDirForClient(skillName: string): string {
 }
 
 /**
+ * Returns the directory where Codex complex-skill manifests are cached.
+ */
+export function getCodexManifestDirForClient(): string {
+  return `${getCodexRootDirForClient()}/.manifests`;
+}
+
+/**
  * Returns the path of the aggregated CSP routing policy markdown file
  * that is injected into Codex via `developer_instructions`.
  */

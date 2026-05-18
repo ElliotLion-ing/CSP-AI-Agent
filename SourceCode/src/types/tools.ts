@@ -63,6 +63,12 @@ export interface WriteFileAction {
    */
   is_skill_manifest?: boolean;
   /**
+   * Explicit manifest destination for this complex skill. Codex actions use
+   * ~/.csp-ai-agent/codex/.manifests/<skill-name>.md so an existing legacy
+   * Cursor manifest cannot cause Codex skill files to be skipped.
+   */
+  manifest_path?: string;
+  /**
    * SKILL.md content for incremental comparison (present when is_skill_manifest=true).
    * This content is NOT written to the path field — it's only used for version checking
    * and stored in the manifest directory.

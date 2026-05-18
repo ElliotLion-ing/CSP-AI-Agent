@@ -66,6 +66,9 @@ export interface ClientAdapter {
   /** Directory where complex skills are cached for this client. */
   getSkillDir(skillName: string): string;
 
+  /** Directory where complex-skill manifests are cached for this client. */
+  getManifestDir(): string;
+
   /** Directory where commands are cached for this client. */
   getCommandDir(commandName: string): string;
 

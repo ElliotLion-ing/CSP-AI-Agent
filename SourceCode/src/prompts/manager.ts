@@ -746,10 +746,10 @@ export class PromptManager {
             `Action execution rules:\n` +
             `- **\`write_file\`**: Create or overwrite the file at \`path\` with \`content\`. ` +
             `If \`encoding === "base64"\`, decode \`content\` with \`Buffer.from(content, "base64")\` and write bytes, not the raw base64 string. ` +
-            `Expand \`~\` to the user's home directory. Create parent directories if needed. ` +
+            `Expand \`~\` to the user's home directory. Create parent directories for both \`path\` and any \`manifest_path\` before writing. ` +
             `For complex skill actions with \`is_skill_manifest: true\`, decode \`skill_manifest_content\` from base64, compare it with ` +
-            `\`~/.csp-ai-agent/.manifests/<skill-name>.md\`, and if unchanged skip this action and subsequent \`write_file\` actions for the same skill. ` +
-            `If changed or missing, write all script files, then write the decoded manifest to \`.manifests/<skill-name>.md\`. ` +
+            `\`action.manifest_path\` when present (fallback: \`~/.csp-ai-agent/.manifests/<skill-name>.md\`), and if unchanged skip this action and subsequent \`write_file\` actions for the same skill. ` +
+            `If changed or missing, write all script files, then write the decoded manifest to \`action.manifest_path\` when present (fallback: \`.manifests/<skill-name>.md\`). ` +
             `Never write \`SKILL.md\` into the skill script directory; it belongs only in \`.manifests\`. ` +
             `**CRITICAL: if the action contains a \`mode\` field (e.g. \`"0755"\`), you MUST set the file's Unix permissions ` +
             `after writing using \`chmod(path, parseInt(mode, 8))\` (or \`fs.chmodSync\` in Node.js). ` +
@@ -780,10 +780,10 @@ export class PromptManager {
             `execute every action on the user's LOCAL machine:\n\n` +
             `- **\`write_file\`**: Create or overwrite file at \`path\` with \`content\`. ` +
             `If \`encoding === "base64"\`, decode \`content\` with \`Buffer.from(content, "base64")\` and write bytes, not the raw base64 string. ` +
-            `Expand \`~\` to the user's home directory. Create parent directories if needed. ` +
+            `Expand \`~\` to the user's home directory. Create parent directories for both \`path\` and any \`manifest_path\` before writing. ` +
             `For complex skill actions with \`is_skill_manifest: true\`, decode \`skill_manifest_content\` from base64, compare it with ` +
-            `\`~/.csp-ai-agent/.manifests/<skill-name>.md\`, and if unchanged skip this action and subsequent \`write_file\` actions for the same skill. ` +
-            `If changed or missing, write all script files, then write the decoded manifest to \`.manifests/<skill-name>.md\`. ` +
+            `\`action.manifest_path\` when present (fallback: \`~/.csp-ai-agent/.manifests/<skill-name>.md\`), and if unchanged skip this action and subsequent \`write_file\` actions for the same skill. ` +
+            `If changed or missing, write all script files, then write the decoded manifest to \`action.manifest_path\` when present (fallback: \`.manifests/<skill-name>.md\`). ` +
             `Never write \`SKILL.md\` into the skill script directory; it belongs only in \`.manifests\`. ` +
             `**CRITICAL: if the action contains a \`mode\` field (e.g. \`"0755"\`), you MUST set the file's Unix permissions ` +
             `after writing using \`chmod(path, parseInt(mode, 8))\` (or \`fs.chmodSync\` in Node.js). ` +
