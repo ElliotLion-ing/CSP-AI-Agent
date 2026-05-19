@@ -71,6 +71,9 @@ assert(uninstall.includes("action: 'remove_mcp_json_entry'"), 'Cursor uninstall 
 
 assert(manageSubscription.includes('const manifestFile = `${unsubClientAdapter.getManifestDir()}/${resourceName}.md`;'), 'manage_subscription unsubscribe uses adapter-specific manifest dir');
 assert(manageSubscription.includes('setup_required: true') && manageSubscription.includes('local_actions_summary'), 'manage_subscription surfaces pending local action summary');
+assert(manageSubscription.includes('promptManager.storeSyncActions(typedParams.user_token ?? \'\', unsubscribeLocalActions);'), 'manage_subscription caches unsubscribe cleanup actions for setup prompt');
+assert(manageSubscription.includes('local_actions_block_completion: true'), 'manage_subscription marks unsubscribe local actions as completion-blocking');
+assert(manageSubscription.includes('before verifying local filesystem or config state'), 'manage_subscription message blocks premature C5/C9 verification');
 
 assert(promptManager.includes('write it as the TOML table \\`[mcp_servers.<name>]\\`'), 'Setup prompt explains object merge_toml table writes');
 assert(promptManager.includes('do not write the object as quoted or escaped JSON'), 'Setup prompt forbids escaped JSON TOML writes');
@@ -94,6 +97,7 @@ assert(http.includes('cacheToolFollowUpActions(userToken, result);'), 'tool call
 assert(http.includes('promptManager.storeSyncActions(userToken ?? \'\', actions);'), 'tool follow-up cache stores local actions in promptManager');
 assert(http.includes('promptManager.storeRestartHint(userToken ?? \'\', toolResult.data.restart_hint);'), 'tool follow-up cache stores restart hints in promptManager');
 assert(http.includes('MANDATORY LOCAL ACTIONS REQUIRED'), 'tool responses prepend an explicit local action warning');
+assert(http.includes('Do not verify local filesystem/config state or mark the case complete until these actions have been executed.'), 'tool responses block premature local-state verification');
 
 console.log('='.repeat(80));
 console.log(`Test Results: ${passed} passed, ${failed} failed`);

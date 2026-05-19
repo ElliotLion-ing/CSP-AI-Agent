@@ -22,7 +22,7 @@ function buildLocalActionsSummary(localActions: import('../types/tools.js').Loca
     action_count: localActions.length,
     action_types: Array.from(new Set(localActions.map((action) => action.action))),
     message:
-      'Execute every local_actions_required item immediately on the user\'s local machine before treating this subscription change as complete.',
+      'Execute every local_actions_required item immediately on the user\'s local machine before treating this subscription change as complete or verifying local state.',
   };
 }
 
@@ -366,6 +366,10 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
         }
         const unsubscribeLocalActionsSummary = buildLocalActionsSummary(unsubscribeLocalActions);
 
+        if (unsubscribeLocalActions.length > 0) {
+          promptManager.storeSyncActions(typedParams.user_token ?? '', unsubscribeLocalActions);
+        }
+
         result = {
           action: 'unsubscribe',
           success: true,
@@ -374,7 +378,7 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
             removedCount > 0 ? `Removed local files for ${removedCount} resource${removedCount > 1 ? 's' : ''}.` : null,
             notFoundCount > 0 ? `${notFoundCount} resource${notFoundCount > 1 ? 's were' : ' was'} not installed locally.` : null,
             unsubscribeLocalActions.length > 0
-              ? `IMPORTANT: You MUST execute ALL ${unsubscribeLocalActions.length} action(s) in local_actions_required immediately to delete local skill files and manifests. Do not skip any delete_file action.`
+              ? `IMPORTANT: You MUST execute ALL ${unsubscribeLocalActions.length} action(s) in local_actions_required immediately before verifying local filesystem or config state. Do not report C5/C9 cleanup complete until these actions have been applied.`
               : null,
             localSuppressionApplied
               ? `NOTE: ${stillPresentIds.length} default/baseline subscription${stillPresentIds.length > 1 ? 's were' : ' was'} still returned by the server, so a local unsubscribe override was applied for this MCP session.`
@@ -386,7 +390,11 @@ export async function manageSubscription(params: unknown): Promise<ToolResult<Ma
           sync_details: uninstallResults.map(r => ({ id: r.id, name: r.id, action: r.removed ? 'uninstalled' : 'not_found_locally' })),
           ...(unsubscribeLocalActions.length > 0 ? { local_actions_required: unsubscribeLocalActions } : {}),
           ...(unsubscribeLocalActionsSummary
-            ? { setup_required: true, local_actions_summary: unsubscribeLocalActionsSummary }
+            ? {
+                setup_required: true,
+                local_actions_block_completion: true,
+                local_actions_summary: unsubscribeLocalActionsSummary,
+              }
             : {}),
         };
 

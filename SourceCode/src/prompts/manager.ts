@@ -741,7 +741,7 @@ export class PromptManager {
           ? (
             `### Step 1 — Apply these local actions NOW\n` +
             `The server has already synced resources.  ` +
-            `Execute ALL of the following actions on the user's LOCAL machine immediately:\n\n` +
+            `Execute ALL of the following actions on the user's LOCAL machine immediately before verifying local filesystem/config state or reporting completion:\n\n` +
             `\`\`\`json\n${JSON.stringify(cachedActions, null, 2)}\n\`\`\`\n\n` +
             `Action execution rules:\n` +
             `- **\`write_file\`**: Create or overwrite the file at \`path\` with \`content\`. ` +
@@ -777,7 +777,7 @@ export class PromptManager {
             `- \`scope\`: \`"global"\`\n\n` +
             `### Step 2 — Apply local actions\n` +
             `If the \`sync_resources\` result contains a \`local_actions_required\` array, ` +
-            `execute every action on the user's LOCAL machine:\n\n` +
+            `execute every action on the user's LOCAL machine before verifying local filesystem/config state or reporting completion:\n\n` +
             `- **\`write_file\`**: Create or overwrite file at \`path\` with \`content\`. ` +
             `If \`encoding === "base64"\`, decode \`content\` with \`Buffer.from(content, "base64")\` and write bytes, not the raw base64 string. ` +
             `Expand \`~\` to the user's home directory. Create parent directories for both \`path\` and any \`manifest_path\` before writing. ` +

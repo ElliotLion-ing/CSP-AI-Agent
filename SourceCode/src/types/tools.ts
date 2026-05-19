@@ -406,6 +406,11 @@ export interface ManageSubscriptionResult {
    */
   setup_required?: boolean;
   /**
+   * True when callers must not verify local state or report completion until
+   * every local_actions_required item has been executed on the user's machine.
+   */
+  local_actions_block_completion?: boolean;
+  /**
    * Compact metadata surfaced ahead of large JSON payloads so Codex notices
    * mandatory local actions even when it does not inspect every nested field.
    */

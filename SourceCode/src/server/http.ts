@@ -526,6 +526,7 @@ function buildImmediateLocalActionSummary(result: unknown): string | undefined {
     summary?.message ?? 'Execute every local_actions_required item immediately on the user\'s local machine before continuing.',
     `Action count: ${summary?.action_count ?? actions.length}`,
     `Action types: ${actionTypes.join(', ')}`,
+    'Do not verify local filesystem/config state or mark the case complete until these actions have been executed.',
     'Do not wait for a later setup prompt if the actions are already present in this tool result.',
   ].join('\n');
 }
