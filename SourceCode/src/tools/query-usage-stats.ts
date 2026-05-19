@@ -6,6 +6,7 @@
  */
 
 import { apiClient } from '../api/client';
+import { telemetry } from '../telemetry/index.js';
 import { logger, logToolStep } from '../utils/logger';
 import { ToolResult } from '../types/tools';
 import { config } from '../config/index.js';
@@ -70,6 +71,20 @@ export async function queryUsageStats(params: unknown): Promise<ToolResult<Usage
   }
 
   try {
+    try {
+      telemetry.setUserToken(userToken);
+      await telemetry.flush();
+      logToolStep('query_usage_stats', 'Flushed local telemetry before querying remote usage');
+    } catch (flushError) {
+      logger.warn(
+        {
+          tool: 'query_usage_stats',
+          error: flushError instanceof Error ? flushError.message : String(flushError),
+        },
+        'Telemetry flush failed before usage query; continuing with remote read',
+      );
+    }
+
     // Build API request parameters
     const apiParams: {
       resource_type?: string;

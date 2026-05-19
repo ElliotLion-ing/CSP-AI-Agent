@@ -32,6 +32,7 @@ const manageSubscriptionPath = path.join(root, 'SourceCode/src/tools/manage-subs
 const promptManagerPath = path.join(root, 'SourceCode/src/prompts/manager.ts');
 const typesPath = path.join(root, 'SourceCode/src/types/tools.ts');
 const usagePath = path.join(root, 'SourceCode/src/tools/query-usage-stats.ts');
+const httpPath = path.join(root, 'SourceCode/src/server/http.ts');
 const codexAdapterPath = path.join(root, 'SourceCode/src/client-adapters/codex-adapter.ts');
 const cursorAdapterPath = path.join(root, 'SourceCode/src/client-adapters/cursor-adapter.ts');
 
@@ -41,6 +42,7 @@ const manageSubscription = fs.readFileSync(manageSubscriptionPath, 'utf8');
 const promptManager = fs.readFileSync(promptManagerPath, 'utf8');
 const types = fs.readFileSync(typesPath, 'utf8');
 const usage = fs.readFileSync(usagePath, 'utf8');
+const http = fs.readFileSync(httpPath, 'utf8');
 const codexAdapter = fs.readFileSync(codexAdapterPath, 'utf8');
 const cursorAdapter = fs.readFileSync(cursorAdapterPath, 'utf8');
 
@@ -81,6 +83,12 @@ assert(types.includes('resource_id?: string'), 'uninstall_resource params accept
 
 assert(usage.includes('agent_profile: AgentProfile'), 'query_usage_stats result exposes agent_profile');
 assert(usage.includes('agent_profile: agentProfile'), 'query_usage_stats returns resolved agent_profile');
+assert(usage.includes('telemetry.setUserToken(userToken);'), 'query_usage_stats activates the caller token before flushing telemetry');
+assert(usage.includes('await telemetry.flush();'), 'query_usage_stats flushes telemetry before reading remote usage');
+assert(http.includes('function cacheToolFollowUpActions'), 'http server has a shared tool follow-up cache helper');
+assert(http.includes('cacheToolFollowUpActions(userToken, result);'), 'tool calls cache local_actions_required and restart hints after execution');
+assert(http.includes('promptManager.storeSyncActions(userToken ?? \'\', actions);'), 'tool follow-up cache stores local actions in promptManager');
+assert(http.includes('promptManager.storeRestartHint(userToken ?? \'\', toolResult.data.restart_hint);'), 'tool follow-up cache stores restart hints in promptManager');
 
 console.log('='.repeat(80));
 console.log(`Test Results: ${passed} passed, ${failed} failed`);

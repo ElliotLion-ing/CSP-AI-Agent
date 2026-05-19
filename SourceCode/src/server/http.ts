@@ -28,6 +28,7 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { sessionManager } from '../session/manager';
 import { toolRegistry } from '../tools/registry';
+import type { LocalAction } from '../types/tools.js';
 import {
   tokenAuthOrLegacyMiddleware,
   checkToolCallPermission,
@@ -465,6 +466,34 @@ export class HTTPServer {
 // Singleton instance (initialized without cache manager initially)
 export const httpServer = new HTTPServer();
 
+function cacheToolFollowUpActions(userToken: string | undefined, result: unknown): void {
+  if (!result || typeof result !== 'object') {
+    return;
+  }
+
+  const toolResult = result as {
+    success?: boolean;
+    data?: {
+      local_actions_required?: LocalAction[];
+      restart_required?: boolean;
+      restart_hint?: string;
+    };
+  };
+
+  if (!toolResult.success || !toolResult.data) {
+    return;
+  }
+
+  const actions = toolResult.data.local_actions_required;
+  if (Array.isArray(actions) && actions.length > 0) {
+    promptManager.storeSyncActions(userToken ?? '', actions);
+  }
+
+  if (toolResult.data.restart_required && toolResult.data.restart_hint) {
+    promptManager.storeRestartHint(userToken ?? '', toolResult.data.restart_hint);
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared MCP Server factory
 // Exported so that stdio transport in server.ts can reuse the same
@@ -554,6 +583,7 @@ export function createMcpServerInstance(
 
     try {
       const result = await toolRegistry.callTool(name, enrichedArgs);
+      cacheToolFollowUpActions(userToken, result);
       const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
       return { content: [{ type: 'text' as const, text }] };
     } catch (err) {
