@@ -69,6 +69,9 @@ assert(uninstall.includes("action: 'remove_toml_entry'"), 'Codex uninstall remov
 assert(uninstall.includes("Do not emit Cursor install-dir cleanup here"), 'Codex uninstall avoids Cursor cleanup path');
 assert(uninstall.includes("action: 'remove_mcp_json_entry'"), 'Cursor uninstall still removes mcp.json entry');
 
+assert(manageSubscription.includes('const manifestFile = `${unsubClientAdapter.getManifestDir()}/${resourceName}.md`;'), 'manage_subscription unsubscribe uses adapter-specific manifest dir');
+assert(manageSubscription.includes('setup_required: true') && manageSubscription.includes('local_actions_summary'), 'manage_subscription surfaces pending local action summary');
+
 assert(promptManager.includes('write it as the TOML table \\`[mcp_servers.<name>]\\`'), 'Setup prompt explains object merge_toml table writes');
 assert(promptManager.includes('do not write the object as quoted or escaped JSON'), 'Setup prompt forbids escaped JSON TOML writes');
 assert(promptManager.includes('encoding === "base64"'), 'Setup prompt requires base64 decoding for write_file actions');
@@ -86,9 +89,11 @@ assert(usage.includes('agent_profile: agentProfile'), 'query_usage_stats returns
 assert(usage.includes('telemetry.setUserToken(userToken);'), 'query_usage_stats activates the caller token before flushing telemetry');
 assert(usage.includes('await telemetry.flush();'), 'query_usage_stats flushes telemetry before reading remote usage');
 assert(http.includes('function cacheToolFollowUpActions'), 'http server has a shared tool follow-up cache helper');
+assert(http.includes('function buildImmediateLocalActionSummary'), 'http server builds a front-loaded local action summary for tool responses');
 assert(http.includes('cacheToolFollowUpActions(userToken, result);'), 'tool calls cache local_actions_required and restart hints after execution');
 assert(http.includes('promptManager.storeSyncActions(userToken ?? \'\', actions);'), 'tool follow-up cache stores local actions in promptManager');
 assert(http.includes('promptManager.storeRestartHint(userToken ?? \'\', toolResult.data.restart_hint);'), 'tool follow-up cache stores restart hints in promptManager');
+assert(http.includes('MANDATORY LOCAL ACTIONS REQUIRED'), 'tool responses prepend an explicit local action warning');
 
 console.log('='.repeat(80));
 console.log(`Test Results: ${passed} passed, ${failed} failed`);

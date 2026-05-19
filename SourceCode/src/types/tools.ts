@@ -400,6 +400,20 @@ export interface ManageSubscriptionResult {
    * Present on unsubscribe when skill directories or manifest files need cleanup.
    */
   local_actions_required?: LocalAction[];
+  /**
+   * True when the subscription change still requires local file-system work on
+   * the client machine before the requested state is actually achieved.
+   */
+  setup_required?: boolean;
+  /**
+   * Compact metadata surfaced ahead of large JSON payloads so Codex notices
+   * mandatory local actions even when it does not inspect every nested field.
+   */
+  local_actions_summary?: {
+    action_count: number;
+    action_types: string[];
+    message: string;
+  };
 }
 
 // search_resources
