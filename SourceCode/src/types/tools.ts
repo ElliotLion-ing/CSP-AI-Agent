@@ -63,6 +63,12 @@ export interface WriteFileAction {
    */
   is_skill_manifest?: boolean;
   /**
+   * Explicit manifest destination for this complex skill. Codex actions use
+   * ~/.csp-ai-agent/codex/.manifests/<skill-name>.md so an existing legacy
+   * Cursor manifest cannot cause Codex skill files to be skipped.
+   */
+  manifest_path?: string;
+  /**
    * SKILL.md content for incremental comparison (present when is_skill_manifest=true).
    * This content is NOT written to the path field — it's only used for version checking
    * and stored in the manifest directory.
@@ -394,6 +400,25 @@ export interface ManageSubscriptionResult {
    * Present on unsubscribe when skill directories or manifest files need cleanup.
    */
   local_actions_required?: LocalAction[];
+  /**
+   * True when the subscription change still requires local file-system work on
+   * the client machine before the requested state is actually achieved.
+   */
+  setup_required?: boolean;
+  /**
+   * True when callers must not verify local state or report completion until
+   * every local_actions_required item has been executed on the user's machine.
+   */
+  local_actions_block_completion?: boolean;
+  /**
+   * Compact metadata surfaced ahead of large JSON payloads so Codex notices
+   * mandatory local actions even when it does not inspect every nested field.
+   */
+  local_actions_summary?: {
+    action_count: number;
+    action_types: string[];
+    message: string;
+  };
 }
 
 // search_resources

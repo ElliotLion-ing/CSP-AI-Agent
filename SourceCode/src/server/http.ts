@@ -28,6 +28,7 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { sessionManager } from '../session/manager';
 import { toolRegistry } from '../tools/registry';
+import type { LocalAction } from '../types/tools.js';
 import {
   tokenAuthOrLegacyMiddleware,
   checkToolCallPermission,
@@ -465,6 +466,71 @@ export class HTTPServer {
 // Singleton instance (initialized without cache manager initially)
 export const httpServer = new HTTPServer();
 
+function cacheToolFollowUpActions(userToken: string | undefined, result: unknown): void {
+  if (!result || typeof result !== 'object') {
+    return;
+  }
+
+  const toolResult = result as {
+    success?: boolean;
+    data?: {
+      local_actions_required?: LocalAction[];
+      restart_required?: boolean;
+      restart_hint?: string;
+    };
+  };
+
+  if (!toolResult.success || !toolResult.data) {
+    return;
+  }
+
+  const actions = toolResult.data.local_actions_required;
+  if (Array.isArray(actions) && actions.length > 0) {
+    promptManager.storeSyncActions(userToken ?? '', actions);
+  }
+
+  if (toolResult.data.restart_required && toolResult.data.restart_hint) {
+    promptManager.storeRestartHint(userToken ?? '', toolResult.data.restart_hint);
+  }
+}
+
+function buildImmediateLocalActionSummary(result: unknown): string | undefined {
+  if (!result || typeof result !== 'object') {
+    return undefined;
+  }
+
+  const toolResult = result as {
+    success?: boolean;
+    data?: {
+      local_actions_required?: LocalAction[];
+      local_actions_summary?: {
+        action_count?: number;
+        action_types?: string[];
+        message?: string;
+      };
+    };
+  };
+
+  const actions = toolResult.data?.local_actions_required;
+  if (!toolResult.success || !Array.isArray(actions) || actions.length === 0) {
+    return undefined;
+  }
+
+  const summary = toolResult.data?.local_actions_summary;
+  const actionTypes = summary?.action_types?.length
+    ? summary.action_types
+    : Array.from(new Set(actions.map((action) => action.action)));
+
+  return [
+    'MANDATORY LOCAL ACTIONS REQUIRED',
+    summary?.message ?? 'Execute every local_actions_required item immediately on the user\'s local machine before continuing.',
+    `Action count: ${summary?.action_count ?? actions.length}`,
+    `Action types: ${actionTypes.join(', ')}`,
+    'Do not verify local filesystem/config state or mark the case complete until these actions have been executed.',
+    'Do not wait for a later setup prompt if the actions are already present in this tool result.',
+  ].join('\n');
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared MCP Server factory
 // Exported so that stdio transport in server.ts can reuse the same
@@ -554,8 +620,15 @@ export function createMcpServerInstance(
 
     try {
       const result = await toolRegistry.callTool(name, enrichedArgs);
+      cacheToolFollowUpActions(userToken, result);
       const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-      return { content: [{ type: 'text' as const, text }] };
+      const immediateSummary = buildImmediateLocalActionSummary(result);
+      return {
+        content: [
+          ...(immediateSummary ? [{ type: 'text' as const, text: immediateSummary }] : []),
+          { type: 'text' as const, text },
+        ],
+      };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error({ toolName: name, err }, 'Tool execution failed');

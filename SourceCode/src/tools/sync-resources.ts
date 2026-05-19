@@ -25,7 +25,6 @@ import {
   getCursorResourcePath,
   getCursorTypeDirForClient,
   getCursorRootDirForClient,
-  getCspAgentRootDirForClient,
 } from '../utils/cursor-paths';
 import { MCPServerError } from '../types/errors';
 import type {
@@ -207,6 +206,80 @@ function encodeForCheck(
     expected_content: enc.content,
     expected_content_encoding: enc.encoding,
   };
+}
+
+type ResourceFile = {
+  path: string;
+  content: string;
+  encoding?: string;
+};
+
+async function loadPromptResourceFiles(
+  resourceId: string,
+  resourceName: string,
+  resourceType: 'command' | 'skill',
+  userToken?: string,
+): Promise<ResourceFile[]> {
+  const downloadResult = await apiClient.downloadResource(resourceId, userToken);
+  if (downloadResult.files.length > 0) {
+    return downloadResult.files;
+  }
+
+  return multiSourceGitManager.readResourceFiles(resourceName, resourceType);
+}
+
+function getPrimaryPromptFile(sourceFiles: ResourceFile[], resourceName: string, isSkill: boolean): ResourceFile | undefined {
+  return isSkill
+    ? (sourceFiles.find((f) => path.basename(f.path) === 'SKILL.md') ??
+       sourceFiles.find((f) => f.path.endsWith('.md')) ??
+       sourceFiles[0])
+    : (sourceFiles.find((f) => path.basename(f.path).replace(/\.md$/, '') === resourceName) ??
+       sourceFiles.find((f) => f.path.endsWith('.md')) ??
+       sourceFiles[0]);
+}
+
+function getLocalScriptFiles(sourceFiles: ResourceFile[]): ResourceFile[] {
+  return sourceFiles.filter(f =>
+    !f.path.endsWith('.md') &&
+    f.path !== 'SKILL.md' &&
+    !f.path.endsWith('/SKILL.md')
+  );
+}
+
+function queueComplexSkillCheckActions(
+  localActions: LocalAction[],
+  clientAdapter: ReturnType<typeof adapterRegistry.get>,
+  resourceId: string,
+  resourceName: string,
+  scriptFiles: ResourceFile[],
+  manifestContent: string,
+): number {
+  if (scriptFiles.length === 0) {
+    return 0;
+  }
+
+  const skillDir = clientAdapter.getSkillDir(resourceName);
+  for (const scriptFile of scriptFiles) {
+    localActions.push({
+      action: 'check_file',
+      path: `${skillDir}/${scriptFile.path}`,
+      ...encodeForCheck(scriptFile.path, scriptFile.content, scriptFile.encoding),
+      resource_id: resourceId,
+      resource_name: resourceName,
+      resource_type: 'skill',
+    });
+  }
+
+  localActions.push({
+    action: 'check_file',
+    path: `${clientAdapter.getManifestDir()}/${resourceName}.md`,
+    ...encodeForCheck('SKILL.md', manifestContent),
+    resource_id: resourceId,
+    resource_name: resourceName,
+    resource_type: 'skill',
+  });
+
+  return scriptFiles.length + 1;
 }
 
 
@@ -403,53 +476,46 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             };
             const isRegistered = promptManager.has(promptManager.buildPromptName(meta), userToken ?? '');
             if (isRegistered) {
-              tally.cached++;
-              details.push({ id: sub.id, name: sub.name, action: 'cached', version: resourceVersion });
-              
-              // ── ADDITIONAL: Check if skill has local scripts in .csp-ai-agent ────
-              // Complex skills store scripts in ~/.csp-ai-agent/skills/<name>/
-              // We need to verify those are also up-to-date
+              let checkAction: 'cached' | 'failed' = 'cached';
+
+              // Complex skills need local script and manifest checks in the
+              // active client subtree.  Use the same API/Git source-file path
+              // as incremental sync; Git metadata alone misses API-backed
+              // skills such as zoom-build and can falsely report "cached".
               if (sub.type === 'skill') {
                 try {
-                  const metadata = await multiSourceGitManager.scanResourceMetadata(sub.name, sub.type);
-                  if (metadata.has_scripts && metadata.script_files) {
-                    logToolStep('sync_resources', 'Skill has scripts — generating script check actions', {
+                  const sourceFiles = await loadPromptResourceFiles(sub.id, sub.name, sub.type, userToken);
+                  const scriptFiles = getLocalScriptFiles(sourceFiles);
+                  const primaryFile = getPrimaryPromptFile(sourceFiles, sub.name, true);
+                  const actionCount = queueComplexSkillCheckActions(
+                    localActions,
+                    clientAdapter,
+                    sub.id,
+                    sub.name,
+                    scriptFiles,
+                    primaryFile?.content ?? '',
+                  );
+
+                  if (actionCount > 0) {
+                    checkAction = 'failed';
+                    logToolStep('sync_resources', 'Complex skill check actions queued for AI Agent', {
                       resourceId: sub.id,
-                      scriptCount: metadata.script_files.length,
-                    });
-                    
-                    // Check each script file in .csp-ai-agent
-                    const skillDir = clientAdapter.getSkillDir(sub.name);
-                    for (const scriptFile of metadata.script_files) {
-                      localActions.push({
-                        action: 'check_file',
-                        path: `${skillDir}/${scriptFile.relative_path}`,
-                        ...encodeForCheck(scriptFile.relative_path, scriptFile.content, scriptFile.encoding),
-                        resource_id: sub.id,
-                        resource_name: sub.name,
-                        resource_type: sub.type,
-                      });
-                    }
-                    
-                    // Also check the manifest file
-                    const proxyScript = metadata.script_files[0];
-                    localActions.push({
-                      action: 'check_file',
-                      path: `${getCspAgentRootDirForClient()}/.manifests/${sub.name}.md`,
-                      ...encodeForCheck(
-                        proxyScript?.relative_path ?? '',
-                        proxyScript?.content ?? '',
-                        proxyScript?.encoding,
-                      ),  // Use first script as proxy
-                      resource_id: sub.id,
-                      resource_name: sub.name,
-                      resource_type: sub.type,
+                      scriptCount: scriptFiles.length,
+                      manifestPath: `${clientAdapter.getManifestDir()}/${sub.name}.md`,
+                      actionCount,
                     });
                   }
-                } catch {
-                  // No scripts or scan failed — skip script check
+                } catch (err) {
+                  checkAction = 'failed';
+                  logger.warn(
+                    { resourceId: sub.id, resourceName: sub.name, error: (err as Error).message },
+                    'Failed to prepare complex skill local checks',
+                  );
                 }
               }
+
+              tally[checkAction]++;
+              details.push({ id: sub.id, name: sub.name, action: checkAction, version: resourceVersion });
             } else {
               tally.failed++;
               details.push({ id: sub.id, name: sub.name, action: 'failed', version: resourceVersion });
@@ -547,12 +613,14 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                 }
               }
 
-              // Placeholder: AI will update this after executing check actions
-              tally.cached++;
+              // Server cannot access the user's local filesystem. Once
+              // check_file actions are queued, report the resource as failed
+              // until the Agent executes those checks and observes matches.
+              tally.failed++;
               details.push({
                 id: sub.id,
                 name: sub.name,
-                action: 'cached',
+                action: 'failed',
                 version: resourceVersion,
               });
 
@@ -615,13 +683,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             //   - command: prefer the file whose name matches the resource name
             //   - fallback: first .md file, then first file of any type
             const isSkill = sub.type === 'skill';
-            const primaryFile = isSkill
-              ? (sourceFiles.find((f) => path.basename(f.path) === 'SKILL.md') ??
-                 sourceFiles.find((f) => f.path.endsWith('.md')) ??
-                 sourceFiles[0])
-              : (sourceFiles.find((f) => path.basename(f.path).replace(/\.md$/, '') === sub.name) ??
-                 sourceFiles.find((f) => f.path.endsWith('.md')) ??
-                 sourceFiles[0]);
+            const primaryFile = getPrimaryPromptFile(sourceFiles, sub.name, isSkill);
 
             const rawContent = primaryFile?.content ?? '';
 
@@ -666,11 +728,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             
             try {
               // Filter out markdown files from sourceFiles to identify scripts
-              const scriptFiles = sourceFiles.filter(f => 
-                !f.path.endsWith('.md') && 
-                f.path !== 'SKILL.md' &&
-                !f.path.endsWith('/SKILL.md')
-              );
+              const scriptFiles = getLocalScriptFiles(sourceFiles);
               
               if (scriptFiles.length > 0) {
                 // Complex skill detected via API download
@@ -688,6 +746,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                 // This prevents the client from auto-discovering the skill while
                 // enabling script execution.
                 const skillDir = clientAdapter.getSkillDir(sub.name);
+                const manifestPath = `${clientAdapter.getManifestDir()}/${sub.name}.md`;
                 
                 // Generate write_file actions for script files ONLY (exclude SKILL.md)
                 // First script file carries is_skill_manifest marker for atomic update check
@@ -704,6 +763,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                     mode: firstScript.path.includes('scripts/') ? '0755' : undefined,
                     // Atomic update marker: client checks manifest FIRST
                     is_skill_manifest: true,
+                    manifest_path: manifestPath,
                     // SKILL.md content for version comparison (stored separately in .manifests/)
                     skill_manifest_content: Buffer.from(rawContent, "utf8").toString("base64"),
                   });
@@ -744,6 +804,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
 
                   // Use client-adapter-resolved directory (Cursor vs Codex subtree).
                   const skillDir = clientAdapter.getSkillDir(sub.name);
+                  const manifestPath = `${clientAdapter.getManifestDir()}/${sub.name}.md`;
                   
                   if (metadata.script_files.length > 0) {
                     const firstScript = metadata.script_files[0];
@@ -756,6 +817,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                         ...encodeForRender(firstScript.relative_path, firstScript.content, firstScript.encoding),
                         mode: firstScript.mode ?? (firstScript.relative_path.includes('scripts/') ? '0755' : undefined),
                         is_skill_manifest: true,
+                        manifest_path: manifestPath,
                         skill_manifest_content: Buffer.from(rawContent, "utf8").toString("base64"),
                       });
                     }
@@ -1483,7 +1545,7 @@ export const syncResourcesTool = {
     'For write_file actions: ' +
     '  SPECIAL HANDLING FOR COMPLEX SKILLS (when action has `is_skill_manifest: true`): ' +
     '    (1) This action is the FIRST script file — check skill version using manifest FIRST. ' +
-    '    (2) Read manifest file at {CSP_AGENT_ROOT}/.manifests/<skill-name>.md (if exists). ' +
+    '    (2) Read manifest file at action.manifest_path when present; otherwise read {CSP_AGENT_ROOT}/.manifests/<skill-name>.md. ' +
     '        Where {CSP_AGENT_ROOT} is a SIBLING of {CURSOR_ROOT} (same parent directory). ' +
     '    (3) action.skill_manifest_content is ALWAYS base64-encoded — first decode it: ' +
     '        decodedManifest = Buffer.from(action.skill_manifest_content, "base64").toString("utf8") ' +
@@ -1492,7 +1554,7 @@ export const syncResourcesTool = {
     '    (5) If different or manifest missing: ' +
     '        - PROCEED with this action and all subsequent write_file actions for this skill. ' +
     '        - After writing all script files, write decodedManifest (the UTF-8 form, NOT the raw base64 string) ' +
-    '          to {CSP_AGENT_ROOT}/.manifests/<skill-name>.md ' +
+    '          to action.manifest_path when present, otherwise {CSP_AGENT_ROOT}/.manifests/<skill-name>.md ' +
     '    (6) NOTE: SKILL.md is NEVER written to the skills directory (only to .manifests/) to prevent Cursor auto-discovery. ' +
     '  GENERAL HANDLING (when action has NO `is_skill_manifest` marker): ' +
     '    (1) Read the existing file at `path` (if it exists) using fs.readFile() or equivalent. ' +

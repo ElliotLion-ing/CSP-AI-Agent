@@ -14,6 +14,7 @@
 import type { ClientAdapter, AgentProfile, PolicyStrategy } from './index.js';
 import {
   getCodexSkillDirForClient,
+  getCodexManifestDirForClient,
   getCodexConfigTomlPathForClient,
   getCodexPolicyPathForClient,
 } from '../utils/codex-paths.js';
@@ -24,6 +25,10 @@ export class CodexAdapter implements ClientAdapter {
   /** Complex skills are cached in the Codex-specific sub-tree. */
   getSkillDir(skillName: string): string {
     return getCodexSkillDirForClient(skillName);
+  }
+
+  getManifestDir(): string {
+    return getCodexManifestDirForClient();
   }
 
   /**

@@ -32,6 +32,9 @@ const manageSubscriptionPath = path.join(root, 'SourceCode/src/tools/manage-subs
 const promptManagerPath = path.join(root, 'SourceCode/src/prompts/manager.ts');
 const typesPath = path.join(root, 'SourceCode/src/types/tools.ts');
 const usagePath = path.join(root, 'SourceCode/src/tools/query-usage-stats.ts');
+const httpPath = path.join(root, 'SourceCode/src/server/http.ts');
+const codexAdapterPath = path.join(root, 'SourceCode/src/client-adapters/codex-adapter.ts');
+const cursorAdapterPath = path.join(root, 'SourceCode/src/client-adapters/cursor-adapter.ts');
 
 const sync = fs.readFileSync(syncPath, 'utf8');
 const uninstall = fs.readFileSync(uninstallPath, 'utf8');
@@ -39,6 +42,9 @@ const manageSubscription = fs.readFileSync(manageSubscriptionPath, 'utf8');
 const promptManager = fs.readFileSync(promptManagerPath, 'utf8');
 const types = fs.readFileSync(typesPath, 'utf8');
 const usage = fs.readFileSync(usagePath, 'utf8');
+const http = fs.readFileSync(httpPath, 'utf8');
+const codexAdapter = fs.readFileSync(codexAdapterPath, 'utf8');
+const cursorAdapter = fs.readFileSync(cursorAdapterPath, 'utf8');
 
 assert(sync.includes("key: `mcp_servers.${serverName}`"), 'Codex MCP merge_toml targets mcp_servers.<name>');
 assert(!sync.includes("key: `mcp.servers.${serverName}`"), 'Old Codex mcp.servers.<name> key is removed');
@@ -49,6 +55,10 @@ assert(sync.includes('value: toCodexMcpTomlEntry(entry)'), 'Codex MCP merge_toml
 assert(!sync.includes('value: JSON.stringify(toCodexMcpTomlEntry(entry))'), 'Codex MCP merge_toml value is not escaped JSON');
 assert(sync.includes("action: 'merge_mcp_json'"), 'Cursor MCP path still emits merge_mcp_json');
 assert(sync.includes('overwrite: false') && sync.includes('successful setup, so restart hints do not force a re-apply loop'), 'Codex policy TOML action is idempotent');
+assert(sync.includes('manifest_path: manifestPath'), 'Complex skill write_file actions carry explicit manifest_path');
+assert(sync.includes('clientAdapter.getManifestDir()'), 'Complex skill manifests are resolved through the active client adapter');
+assert(codexAdapter.includes('getCodexManifestDirForClient') && codexAdapter.includes('return getCodexManifestDirForClient()'), 'Codex manifests use ~/.csp-ai-agent/codex/.manifests');
+assert(cursorAdapter.includes("return getCspAgentDirForClient('.manifests')"), 'Cursor manifests keep the legacy ~/.csp-ai-agent/.manifests path');
 
 assert(uninstall.includes("agentProfile === 'codex'"), 'Uninstall has Codex branch');
 assert(uninstall.includes('resolveMcpServerNamesForUninstall'), 'Uninstall resolves all MCP server names from mcp-config.json');
@@ -59,17 +69,35 @@ assert(uninstall.includes("action: 'remove_toml_entry'"), 'Codex uninstall remov
 assert(uninstall.includes("Do not emit Cursor install-dir cleanup here"), 'Codex uninstall avoids Cursor cleanup path');
 assert(uninstall.includes("action: 'remove_mcp_json_entry'"), 'Cursor uninstall still removes mcp.json entry');
 
+assert(manageSubscription.includes('const manifestFile = `${unsubClientAdapter.getManifestDir()}/${resourceName}.md`;'), 'manage_subscription unsubscribe uses adapter-specific manifest dir');
+assert(manageSubscription.includes('setup_required: true') && manageSubscription.includes('local_actions_summary'), 'manage_subscription surfaces pending local action summary');
+assert(manageSubscription.includes('promptManager.storeSyncActions(typedParams.user_token ?? \'\', unsubscribeLocalActions);'), 'manage_subscription caches unsubscribe cleanup actions for setup prompt');
+assert(manageSubscription.includes('local_actions_block_completion: true'), 'manage_subscription marks unsubscribe local actions as completion-blocking');
+assert(manageSubscription.includes('before verifying local filesystem or config state'), 'manage_subscription message blocks premature C5/C9 verification');
+
 assert(promptManager.includes('write it as the TOML table \\`[mcp_servers.<name>]\\`'), 'Setup prompt explains object merge_toml table writes');
 assert(promptManager.includes('do not write the object as quoted or escaped JSON'), 'Setup prompt forbids escaped JSON TOML writes');
 assert(promptManager.includes('encoding === "base64"'), 'Setup prompt requires base64 decoding for write_file actions');
 assert(promptManager.includes('skill_manifest_content'), 'Setup prompt explains complex skill manifest handling');
+assert(promptManager.includes('action.manifest_path'), 'Setup prompt uses action.manifest_path for complex skill manifest comparison');
+assert(promptManager.includes('Create parent directories for both \\`path\\` and any \\`manifest_path\\`'), 'Setup prompt requires creating manifest parent directories');
 assert(promptManager.includes('Never write \\`SKILL.md\\` into the skill script directory'), 'Setup prompt prevents SKILL.md from being written to script dir');
 assert(types.includes('Record<string, unknown>'), 'MergeTomlAction accepts structured object values');
+assert(types.includes('manifest_path?: string'), 'WriteFileAction exposes optional manifest_path');
 assert(!types.includes('JSON-encoded object'), 'MergeTomlAction no longer documents escaped JSON object values');
 assert(types.includes('resource_id?: string'), 'uninstall_resource params accept canonical resource_id for MCP cleanup');
 
 assert(usage.includes('agent_profile: AgentProfile'), 'query_usage_stats result exposes agent_profile');
 assert(usage.includes('agent_profile: agentProfile'), 'query_usage_stats returns resolved agent_profile');
+assert(usage.includes('telemetry.setUserToken(userToken);'), 'query_usage_stats activates the caller token before flushing telemetry');
+assert(usage.includes('await telemetry.flush();'), 'query_usage_stats flushes telemetry before reading remote usage');
+assert(http.includes('function cacheToolFollowUpActions'), 'http server has a shared tool follow-up cache helper');
+assert(http.includes('function buildImmediateLocalActionSummary'), 'http server builds a front-loaded local action summary for tool responses');
+assert(http.includes('cacheToolFollowUpActions(userToken, result);'), 'tool calls cache local_actions_required and restart hints after execution');
+assert(http.includes('promptManager.storeSyncActions(userToken ?? \'\', actions);'), 'tool follow-up cache stores local actions in promptManager');
+assert(http.includes('promptManager.storeRestartHint(userToken ?? \'\', toolResult.data.restart_hint);'), 'tool follow-up cache stores restart hints in promptManager');
+assert(http.includes('MANDATORY LOCAL ACTIONS REQUIRED'), 'tool responses prepend an explicit local action warning');
+assert(http.includes('Do not verify local filesystem/config state or mark the case complete until these actions have been executed.'), 'tool responses block premature local-state verification');
 
 console.log('='.repeat(80));
 console.log(`Test Results: ${passed} passed, ${failed} failed`);
