@@ -476,8 +476,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
             };
             const isRegistered = promptManager.has(promptManager.buildPromptName(meta), userToken ?? '');
             if (isRegistered) {
-              tally.cached++;
-              details.push({ id: sub.id, name: sub.name, action: 'cached', version: resourceVersion });
+              let checkAction: 'cached' | 'failed' = 'cached';
 
               // Complex skills need local script and manifest checks in the
               // active client subtree.  Use the same API/Git source-file path
@@ -498,6 +497,7 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                   );
 
                   if (actionCount > 0) {
+                    checkAction = 'failed';
                     logToolStep('sync_resources', 'Complex skill check actions queued for AI Agent', {
                       resourceId: sub.id,
                       scriptCount: scriptFiles.length,
@@ -506,12 +506,16 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                     });
                   }
                 } catch (err) {
+                  checkAction = 'failed';
                   logger.warn(
                     { resourceId: sub.id, resourceName: sub.name, error: (err as Error).message },
                     'Failed to prepare complex skill local checks',
                   );
                 }
               }
+
+              tally[checkAction]++;
+              details.push({ id: sub.id, name: sub.name, action: checkAction, version: resourceVersion });
             } else {
               tally.failed++;
               details.push({ id: sub.id, name: sub.name, action: 'failed', version: resourceVersion });
@@ -609,12 +613,14 @@ export async function syncResources(params: unknown): Promise<ToolResult<SyncRes
                 }
               }
 
-              // Placeholder: AI will update this after executing check actions
-              tally.cached++;
+              // Server cannot access the user's local filesystem. Once
+              // check_file actions are queued, report the resource as failed
+              // until the Agent executes those checks and observes matches.
+              tally.failed++;
               details.push({
                 id: sub.id,
                 name: sub.name,
-                action: 'cached',
+                action: 'failed',
                 version: resourceVersion,
               });
 

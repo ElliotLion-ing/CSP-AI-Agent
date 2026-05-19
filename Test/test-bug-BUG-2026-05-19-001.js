@@ -62,6 +62,21 @@ assert(
 );
 
 assert(
+  sync.includes("let checkAction: 'cached' | 'failed' = 'cached';") &&
+    sync.includes("checkAction = 'failed';") &&
+    sync.includes("details.push({ id: sub.id, name: sub.name, action: checkAction, version: resourceVersion });"),
+  'registered complex skills with pending local check_file actions are not reported as cached',
+);
+
+assert(
+  !sync.includes('Placeholder: AI will update this after executing check actions') &&
+    sync.includes('Once') &&
+    sync.includes('check_file actions are queued') &&
+    sync.includes("action: 'failed'"),
+  'check mode does not mark pending local file comparisons as cached placeholders',
+);
+
+assert(
   !sync.includes('scanResourceMetadata(sub.name, sub.type);\\n                  if (metadata.has_scripts'),
   'old check-mode Git-only metadata path is removed',
 );
