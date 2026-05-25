@@ -62,7 +62,8 @@ async function startStdioServer(): Promise<void> {
   // Reuse the shared factory — same capabilities, prompt handlers,
   // tool handlers, and oninitialized auto-sync as the SSE path.
   // No userId/email/groups for stdio (no auth header available).
-  stdioServer = createMcpServerInstance();
+  // Stdio is used by Cursor local MCP, so bind profile explicitly.
+  stdioServer = createMcpServerInstance(undefined, undefined, undefined, undefined, 'cursor');
 
   const transport = new StdioServerTransport();
   await stdioServer.connect(transport);
