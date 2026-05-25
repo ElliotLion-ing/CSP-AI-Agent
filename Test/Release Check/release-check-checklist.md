@@ -318,26 +318,26 @@ grep -m 3 '"version"\|"team"\|"name"' ~/.csp-ai-agent/skills/zoom-build/teams/cl
 
 ### Case 9：取消订阅 MCP 类型资源 → mcp.json 条目清理
 
-**前置条件：** 订阅列表中存在 `acm`（type: mcp）资源，且 `~/.cursor/mcp.json` 中已有对应条目
+**前置条件：** 订阅列表中存在 `jenkins`（type: mcp）资源，且 `~/.cursor/mcp.json` 中已有对应条目
 
 **模拟用户语句：**
-> "小助手，帮我取消 acm 这个 MCP 的订阅"
+> "小助手，帮我取消 jenkins 这个 MCP 的订阅"
 
 **AI 执行路径验证：**
-1. 调用 `manage_subscription(action: "unsubscribe", resource_ids: ["<acm id>"])`
+1. 调用 `manage_subscription(action: "unsubscribe", resource_ids: ["<jenkins id>"])`
 2. 检查 local_actions 中包含 `remove_mcp_json_entry`
-3. 执行后验证 `mcpServers.acm` 已从 mcp.json 移除
+3. 执行后验证 `mcpServers.jenkins` 已从 mcp.json 移除
 
 **结果对照表：**
 
 | 验证项 | 预期行为 | 实际结果 | 通过？ |
 |--------|----------|----------|--------|
-| 订阅列表中移除 acm | `manage_subscription(list)` 不再返回 acm | | |
+| 订阅列表中移除 jenkins | `manage_subscription(list)` 不再返回 jenkins | | |
 | local_actions 包含 remove_mcp_json_entry | 返回中有该 action | | |
-| mcp.json 条目已删除 | `mcpServers.acm` 不存在 | | |
+| mcp.json 条目已删除 | `mcpServers.jenkins` 不存在 | | |
 | 其他 mcp.json 条目不受影响 | 其他 MCP server 配置保持不变 | | |
 
-> **注意：** 测试完成后必须在收尾阶段重新订阅 `acm` 并执行 `sync_resources` 以恢复配置。
+> **注意：** 测试完成后必须在收尾阶段重新订阅 `jenkins` 并执行 `sync_resources` 以恢复配置。
 
 ---
 
@@ -716,7 +716,7 @@ ls ~/.csp-ai-agent/skills/zoom-build/ 2>&1 || echo "PASS: Cursor 路径下无 Co
 > **执行方式：** 在 Codex 会话中，输入与 Part A 相同的模拟用户语句，验证相同的预期行为。
 >
 > **Codex 特有差异点（执行前知悉）：**
-> - Case 9（acm 取消订阅）：验证 `~/.codex/config.toml` 中是否有对应 `[mcp_servers.acm]` 条目被清理（而非 `~/.cursor/mcp.json`）
+> - Case 9（jenkins 取消订阅）：验证 `~/.codex/config.toml` 中是否有对应 `[mcp_servers.jenkins]` 条目被清理（而非 `~/.cursor/mcp.json`）
 > - Case C0-2 中 `developer_instructions` 已写入，是 Codex 与 Cursor 的核心区别
 > - 其余 Case 行为应与 Cursor 完全一致
 
@@ -730,7 +730,7 @@ ls ~/.csp-ai-agent/skills/zoom-build/ 2>&1 || echo "PASS: Cursor 路径下无 Co
 | C6 | 模糊调用路由（CSP 优先） | 验证 policy 注入生效（见 C0-2），Codex Agent 主动调用 manage_subscription | |
 | C7 | Telemetry 计数 | 额外验证 telemetry payload 中 `agent_profile = "codex"` | |
 | C8 | Sync 内容一致性 | 同 Cursor（manifest 版本验证） | |
-| C9 | 取消订阅 MCP 资源 | **Codex 特有**：验证 `config.toml` 中对应 `[mcp_servers.<name>]` 节被清理，而非 mcp.json | |
+| C9 | 取消订阅 MCP 资源 | **Codex 特有**：验证 `config.toml` 中对应 `[mcp_servers.jenkins]` 节被清理，而非 mcp.json | |
 | C10 | winzr-cpp-expert 懒加载链路 | 同 Cursor，验证 md 引用替换和 resource_path 子调用 | |
 
 **Telemetry agent_profile 专项验证（Case C7 扩展）：**
@@ -750,7 +750,7 @@ ls ~/.csp-ai-agent/skills/zoom-build/ 2>&1 || echo "PASS: Cursor 路径下无 Co
 2. **AI 不得提前告知用户它将做什么操作**，应模拟真实响应链路
 3. **订阅快照必须在第一步记录**，测试过程中不得覆盖
 4. **Case 10 / C10 为 Bug 回归验证**，是本版本发布的关键 Check 项，必须通过
-5. **Case 9 / C9 执行后**必须在收尾阶段重新订阅 `acm` 并 sync，以恢复配置
+5. **Case 9 / C9 执行后**必须在收尾阶段重新订阅 `jenkins` 并 sync，以恢复配置
 6. **Case C0-2 横跨重启边界**：Phase 1 完成注入后，AI 必须写入检查点文件 `~/.codex/release-check-checkpoint.md` 并提示用户重启 Codex。重启后用户输入「继续 Release Check，从 Case C0-2 Phase 2 开始」触发 Phase 2 验证。Phase 2 验证通过后 AI 删除检查点文件
 7. **Part B Case C7 必须验证 `agent_profile = "codex"`**：这是 CODEX-001 核心 telemetry 验证项
 8. **所有 Case 结果填写到 Report 文件中**：`Test/Release Check/Reports/release-check-report-YYYY-MM-DD.md`，Part A 和 Part B 分区记录
