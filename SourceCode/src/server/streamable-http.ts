@@ -109,6 +109,7 @@ export class StreamableHTTPServer {
         authedReq.user?.email,
         authedReq.user?.groups,
         token,
+        'codex',
       );
 
       const transport = new StreamableHTTPServerTransport({

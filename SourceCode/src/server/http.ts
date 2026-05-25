@@ -291,6 +291,7 @@ export class HTTPServer {
         request.user?.email,
         request.user?.groups,
         token,
+        'cursor',
       );
 
       // connect() calls transport.start() which triggers the intercepted write()
